@@ -1,0 +1,26 @@
+[project]
+name = "cookie-grabber"
+version = "0.1.0"
+description = "ADS Power cookie farming bot with Playwright and Google Sheets"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.40.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.23.0",
+    "google-auth-httplib2>=0.2.0",
+    "PyYAML>=6.0.1",
+    "httpx[socks]>=0.25.0",
+    "rich>=13.7.0",
+    "customtkinter>=5.2.0",
+    "gala-9static-proxy @ file:///C:/2/Python/Proxy",
+]
+
+[project.scripts]
+cookie-grabber = "cookie_grabber.main:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
