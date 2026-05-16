@@ -17,6 +17,7 @@ Python-пакет **cookie-grabber**: нагул cookies в **ADS Power** чер
 - **`--inline-menu`** — только терминальное меню (**Rich**) в текущей консоли (удобно на Linux/macOS или без окна GUI).
 - **`--detach-console-menu`** (только Windows) — отдельная **консоль** с Rich-клиентом вместо GUI.
 - Сохранение из GUI пишет **`config/settings.yaml`** (см. `save_user_settings()` в [`src/cookie_grabber/config/settings.py`](src/cookie_grabber/config/settings.py)); перед «Старт» на хосте выполняется **RELOAD**.
+- **Windows exe:** сборка [`scripts/build_win.ps1`](scripts/build_win.ps1) → `dist/CookieGrabber/CookieGrabber.exe`. Рядом с exe — `config/`, `secrets/`, `data/` (корень данных = каталог exe, см. [`runtime_paths.py`](src/cookie_grabber/runtime_paths.py)). Релизы и автообновление — GitHub Releases [`edward-ruki-nogi/Cookie_Grabber`](https://github.com/edward-ruki-nogi/Cookie_Grabber); кнопка «Проверить обновление» в GUI.
 
 ## Флаги остановки потоков (`RunControl`)
 
@@ -72,7 +73,7 @@ Python-пакет **cookie-grabber**: нагул cookies в **ADS Power** чер
 | Настройки | `src/cookie_grabber/config/settings.py` (`_DEFAULT_SETTINGS_YAML` + `load_settings`) |
 | ADS API | `ads/ads_power_api.py` |
 | Sheets | `sheets/google_sheets_api.py`, `sheets/atomic.py`, `sheets/models.py` |
-| Прокси | `grabber_proxy.py`: «9 static» через `gala_9static_proxy` (порт = три цифры префикса из настроек + суффикс `01`–`99`, API `:10101`) |
+| Прокси | `grabber_proxy.py`: «9 static» через вендорный `gala_9static_proxy` ([`vendor/gala-9static-proxy/`](vendor/gala-9static-proxy/); порт = три цифры префикса + суффикс `01`–`99`, API `:10101`) |
 | Воркер профиля | `workers/profile_worker.py` |
 | Нагул страницы | `farming/flow.py`, `farming/selectors.py` |
 | Поведение мыши | `behavior/bezier.py`, `cdp_mouse.py`, `timing.py` |

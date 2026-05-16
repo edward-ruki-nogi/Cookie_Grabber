@@ -1,0 +1,96 @@
+# gala-9static-proxy
+
+Библиотека для сценария «9 static»: проверка SOCKS, активация через панель API, пул суффиксов портов, today list, диалоги Tk, бан после Read timed out.
+
+- **Импорт:** `import gala_9static_proxy`
+- **Логи:** стандартный `logging` по модулям (`gala_9static_proxy.*`); настройте root/хендлеры в приложении.
+- **Паузы (today list):** при необходимости подставьте свою функцию: `gala_9static_proxy.set_human_delay(fn)`, сигнатура `fn(min_sec: float, max_sec: float) -> None`.
+
+## Требования
+
+- Python 3.10+
+- `requests[socks]` (указано в `pyproject.toml`)
+
+## Установка в другой проект
+
+### Локальный путь или editable (один ПК, общая папка)
+
+В `requirements.txt` потребителя (путь поправьте под своё расположение):
+
+```text
+-e C:/2/Python/Proxy
+```
+
+или относительно каталога приложения:
+
+```text
+-e ../Proxy
+```
+
+```bash
+pip install -r requirements.txt
+```
+
+Через CLI:
+
+```bash
+pip install -e "C:/2/Python/Proxy"
+```
+
+### Зависимость из Git (один репозиторий для всех машин)
+
+После публикации каталога в git-репозитории в `requirements.txt` / `pyproject.toml`:
+
+```text
+gala-9static-proxy @ git+https://github.com/YOU/gala-9static-proxy.git@main
+```
+
+Обновить до последнего коммита ветки:
+
+```bash
+pip install -U "gala-9static-proxy @ git+https://github.com/YOU/gala-9static-proxy.git@main"
+```
+
+Для воспроизводимых сборок закрепите ref: тег `@v0.1.0` или `@<commit-sha>`.
+
+### PyPI (или внутренний index)
+
+После публикации пакета:
+
+```text
+gala-9static-proxy==0.1.0
+```
+
+```bash
+pip install -U gala-9static-proxy
+```
+
+### Пример `pyproject.toml` ([PEP 508](https://peps.python.org/pep-0508/) URL)
+
+```toml
+dependencies = [
+    "gala-9static-proxy @ file:///C:/2/Python/Proxy",
+]
+```
+
+(на Windows удобнее path-зависимость или `-e` в `requirements`.)
+
+## Использование в коде
+
+```python
+from gala_9static_proxy import (
+    validate_and_activate_proxy,
+    ProxyRunMode,
+    ProxyPortPool,
+    check_proxy,
+)
+from gala_9static_proxy.today_list_activation import port_free_9proxy
+```
+
+## PyInstaller / exe
+
+В том venv, из которого собираете exe, пакет должен быть установлен (`pip install -e ...`). При необходимости добавьте скрытый импорт `gala_9static_proxy` и подмодули в spec/hook.
+
+## Проект Gala
+
+В репозитории Gala подключение идёт через `-e ../Proxy` в `requirements.txt` и shim `utils.proxy`, реэкспортирующий тот же API.

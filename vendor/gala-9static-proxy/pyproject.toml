@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gala-9static-proxy"
+version = "0.1.0"
+description = "9proxy/static proxy helpers: validation, pool, today list API."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests[socks]>=2.31.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gala_9static_proxy*"]

@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and build
+        shell: pwsh
+        run: |
+          pip install -e ".[build]"
+          playwright install chromium
+          pyinstaller --noconfirm CookieGrabber.spec
+          Copy-Item -Force scripts/apply_update.bat dist/CookieGrabber/apply_update.bat
+          $version = python -c "from importlib.metadata import version; print(version('cookie-grabber'))"
+          $zip = "dist/CookieGrabber-$version-win64.zip"
+          Compress-Archive -Path dist/CookieGrabber -DestinationPath $zip -Force
+          echo "ZIP_PATH=$zip" >> $env:GITHUB_ENV
+          echo "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_PATH }}
+          generate_release_notes: true

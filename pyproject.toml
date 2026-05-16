@@ -1,6 +1,6 @@
 [project]
 name = "cookie-grabber"
-version = "0.1.0"
+version = "0.2.0"
 description = "ADS Power cookie farming bot with Playwright and Google Sheets"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,7 +15,12 @@ dependencies = [
     "httpx[socks]>=0.25.0",
     "rich>=13.7.0",
     "customtkinter>=5.2.0",
-    "gala-9static-proxy @ file:///C:/2/Python/Proxy",
+    "gala-9static-proxy @ file:./vendor/gala-9static-proxy",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
 ]
 
 [project.scripts]

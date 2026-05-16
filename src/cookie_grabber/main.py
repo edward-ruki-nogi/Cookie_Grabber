@@ -27,6 +27,7 @@ from gala_9static_proxy import ProxyPortPool, TodayListCache
 
 from cookie_grabber.grabber_proxy import ProxyAllocator, build_validation_timeout_state
 from cookie_grabber.sheets.google_sheets_api import GoogleSheetsApi
+from cookie_grabber.runtime_paths import application_root, gui_client_argv, menu_client_argv
 from cookie_grabber.workers.profile_worker import run_account_loop
 
 logger = logging.getLogger(__name__)
@@ -530,13 +531,7 @@ def _preflight_gui_dependencies() -> None:
 def _spawn_detached_gui_client(project_root: Path, port: int) -> subprocess.Popen:
     log_path = _gui_client_log_path(project_root)
     log_f = log_path.open("w", encoding="utf-8")
-    args = [
-        sys.executable,
-        "-m",
-        "cookie_grabber.gui_spawn",
-        "127.0.0.1",
-        str(port),
-    ]
+    args = gui_client_argv("127.0.0.1", port)
     kwargs: dict[str, object] = {
         "cwd": str(project_root),
         "stderr": log_f,
@@ -548,14 +543,7 @@ def _spawn_detached_gui_client(project_root: Path, port: int) -> subprocess.Pope
 
 
 def _spawn_detached_menu_client(project_root: Path, port: int) -> subprocess.Popen:
-    args = [
-        sys.executable,
-        "-m",
-        "cookie_grabber.main",
-        "--menu-client",
-        "127.0.0.1",
-        str(port),
-    ]
+    args = menu_client_argv("127.0.0.1", port)
     kwargs: dict = {"cwd": str(project_root)}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE  # type: ignore[attr-defined]
@@ -736,7 +724,7 @@ def main(argv: list[str] | None = None) -> None:
             console.print("\n[dim]Отключено окно меню[/dim]")
         return
 
-    project_root = Path.cwd()
+    project_root = application_root()
     use_inline_menu = "--inline-menu" in argv
     use_console_detach = "--detach-console-menu" in argv
 

@@ -3,10 +3,18 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, messagebox
 
+from cookie_grabber.runtime_paths import application_root
+from cookie_grabber.updates.github_release import (
+    check_for_update,
+    download_and_stage_update,
+    launch_apply_update,
+)
 from cookie_grabber.config.settings import (
     PROXY_ISP_ANY,
     PROXY_ISP_VIRGIN,
@@ -78,7 +86,7 @@ def _open_path_default_app(path: Path) -> None:
 
 
 def run_gui_client(host: str, port: int) -> None:
-    project_root = Path.cwd()
+    project_root = application_root()
 
     try:
         sock = socket.create_connection((host, int(port)), timeout=60)
@@ -692,6 +700,126 @@ def run_gui_client(host: str, port: int) -> None:
 
     btn_toggle = ctk.CTkButton(toolbar, text="Настройки  ▾", command=toggle_settings, width=130)
     btn_toggle.pack(side="left", padx=12)
+
+    update_busy: list[bool] = [False]
+
+    def _finish_update_button() -> None:
+        update_busy[0] = False
+        btn_update.configure(state="normal", text="Проверить обновление")
+
+    def _quit_for_update() -> None:
+        try:
+            wf.write("QUIT\n")
+            wf.flush()
+        except Exception:
+            pass
+
+        def _exit() -> None:
+            try:
+                wf.close()
+                rf.close()
+                sock.close()
+            except Exception:
+                pass
+            root.destroy()
+            raise SystemExit(0)
+
+        root.after(400, _exit)
+
+    def _confirm_and_apply(staged, info) -> None:
+        if not messagebox.askyesno(
+            "Обновление",
+            f"Версия {info.latest_version} загружена.\n"
+            "Закрыть Cookie Grabber и установить обновление сейчас?",
+        ):
+            _finish_update_button()
+            return
+        try:
+            launch_apply_update(staged)
+        except Exception as exc:
+            messagebox.showerror("Обновление", f"Не удалось запустить установку:\n{exc}")
+            _finish_update_button()
+            return
+        messagebox.showinfo(
+            "Обновление",
+            "Установка запущена. Приложение закроется и откроется снова после замены файлов.",
+        )
+        _quit_for_update()
+
+    def on_check_update() -> None:
+        if update_busy[0]:
+            return
+        update_busy[0] = True
+        btn_update.configure(state="disabled", text="Проверка…")
+
+        def worker() -> None:
+            err: str | None = None
+            info = None
+            try:
+                info = check_for_update()
+            except Exception as exc:
+                err = str(exc)
+
+            def ui() -> None:
+                if err is not None:
+                    messagebox.showerror("Обновление", f"Не удалось проверить обновления:\n{err}")
+                    _finish_update_button()
+                    return
+                assert info is not None
+                if not info.has_update:
+                    messagebox.showinfo(
+                        "Обновление",
+                        f"Установлена актуальная версия ({info.current_version}).",
+                    )
+                    _finish_update_button()
+                    return
+                if not getattr(sys, "frozen", False):
+                    messagebox.showinfo(
+                        "Обновление",
+                        f"Доступна версия {info.latest_version} (сейчас {info.current_version}).\n"
+                        "Автоустановка только в сборке .exe; откроется страница релиза.",
+                    )
+                    webbrowser.open(info.release_url)
+                    _finish_update_button()
+                    return
+                if not messagebox.askyesno(
+                    "Обновление",
+                    f"Доступна версия {info.latest_version} (сейчас {info.current_version}).\n"
+                    "Скачать и установить?",
+                ):
+                    _finish_update_button()
+                    return
+                btn_update.configure(text="Загрузка…")
+
+                def download_worker() -> None:
+                    try:
+                        staged = download_and_stage_update(info)
+                    except Exception as exc:
+                        root.after(
+                            0,
+                            lambda: (
+                                messagebox.showerror(
+                                    "Обновление", f"Не удалось загрузить обновление:\n{exc}"
+                                ),
+                                _finish_update_button(),
+                            ),
+                        )
+                        return
+                    root.after(0, lambda: _confirm_and_apply(staged, info))
+
+                threading.Thread(target=download_worker, daemon=True).start()
+
+            root.after(0, ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    btn_update = ctk.CTkButton(
+        toolbar,
+        text="Проверить обновление",
+        command=on_check_update,
+        width=150,
+    )
+    btn_update.pack(side="right", padx=4)
 
     ctk.CTkLabel(
         root,
