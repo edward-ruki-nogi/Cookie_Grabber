@@ -26,7 +26,6 @@ hiddenimports = [
     "google_auth_httplib2",
     "httplib2",
     "customtkinter",
-    "ai_dont_care_about_cookies",
     "playwright_cookie_blocker",
     "tldextract",
     "tzdata",
@@ -34,10 +33,10 @@ hiddenimports = [
 ]
 
 for pkg in ("customtkinter", "playwright", "tldextract"):
-    tmp = collect_all(pkg)
-    datas += tmp[0]
-    hiddenimports += tmp[1]
-    binaries += tmp[2]
+    pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hiddenimports
 
 a = Analysis(
     ["src/cookie_grabber/main.py"],
