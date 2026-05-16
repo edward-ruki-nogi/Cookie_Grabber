@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -35,6 +36,25 @@ def is_quota_or_rate_limit_error(exc: BaseException) -> bool:
     return "429" in msg and ("Quota" in msg or "quota" in msg.lower())
 
 
+def _http_error_sheet_summary(exc: HttpError) -> str:
+    """Одна короткая строка для лога без полного тела ошибки."""
+    status = getattr(exc.resp, "status", None) if exc.resp else None
+    try:
+        blob = json.loads((exc.content or b"{}").decode("utf-8", errors="replace"))
+        for detail in blob.get("error", {}).get("details") or []:
+            if not isinstance(detail, dict):
+                continue
+            md = detail.get("metadata") or {}
+            ql = md.get("quota_limit")
+            qv = md.get("quota_limit_value")
+            if ql:
+                cap = f" [{qv}/min]" if qv is not None else ""
+                return f"HTTP {status or '?'} {ql}{cap}"
+    except Exception:
+        pass
+    return f"HTTP {status or '?'} rate_limit"
+
+
 def execute_sheets_op_with_quota_retry(
     op: Callable[[], T],
     *,
@@ -54,11 +74,11 @@ def execute_sheets_op_with_quota_retry(
         except HttpError as e:
             if is_quota_or_rate_limit_error(e) and attempt < QUOTA_MAX_ATTEMPTS - 1:
                 logger.warning(
-                    "Google Sheets: лимит/квота (попытка %s/%s), пауза %.0f с: %s",
+                    "Google Sheets: квота, попытка %s/%s, пауза %.0f с (%s)",
                     attempt + 1,
                     QUOTA_MAX_ATTEMPTS,
                     QUOTA_RETRY_DELAY,
-                    e,
+                    _http_error_sheet_summary(e),
                 )
                 time.sleep(QUOTA_RETRY_DELAY)
                 continue

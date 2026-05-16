@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from rich.console import Console
@@ -16,6 +16,7 @@ from rich.table import Table
 
 from cookie_grabber.ads.ads_power_api import AdsPowerApi
 from cookie_grabber.config.settings import (
+    SETTINGS_SOURCE_PATH,
     AppSettings,
     load_settings,
     save_settings_patch,
@@ -56,7 +57,7 @@ class Orchestrator:
                 return
 
             sheets = GoogleSheetsApi(self.settings)
-            self.control.prepare_new_run()
+            self.control.prepare_new_run(self.settings.accounts_per_run)
             port_pool = ProxyPortPool()
             timeout_state = build_validation_timeout_state(self.settings)
             today_cache = TodayListCache() if self.settings.proxy.use_today_list else None
@@ -86,6 +87,12 @@ class Orchestrator:
                 )
                 self._futures.append(fut)
             logger.info("Запущено воркеров аккаунтов: %s", len(self._futures))
+            futs_snapshot = list(self._futures)
+            threading.Thread(
+                target=self._finalize_after_pool_workers_done,
+                args=(futs_snapshot,),
+                daemon=True,
+            ).start()
 
     def pause(self) -> None:
         self.control.pause.set()
@@ -124,6 +131,23 @@ class Orchestrator:
                         self._cleanup_shared()
                     logger.info("Мягкая остановка: все задачи завершены, пул освобождён.")
                     return
+
+    def _finalize_after_pool_workers_done(self, futs: list) -> None:
+        """Когда все воркеры ``run_account_loop`` завершились (квота, safe_stop из воркера и т.д.), освободить пул."""
+        if not futs:
+            return
+        wait(futs, return_when=ALL_COMPLETED)
+        with self._exec_lock:
+            ex = self._executor
+            if ex is None:
+                return
+            try:
+                ex.shutdown(wait=True, cancel_futures=False)
+            except Exception:
+                logger.exception("Ошибка при shutdown пула после завершения воркеров")
+            finally:
+                self._cleanup_shared()
+        logger.info("Все воркеры аккаунтов завершились, пул освобождён.")
 
     def _cleanup_shared(self) -> None:
         self._executor = None
@@ -199,7 +223,7 @@ class Orchestrator:
         return "\t".join(
             [
                 str(r),
-                str(r / "config" / "default_settings.yaml"),
+                str(SETTINGS_SOURCE_PATH),
                 str(r / "config" / "settings.yaml"),
             ]
         )
@@ -253,8 +277,8 @@ def _menu_inline(root: Path) -> None:
         elif choice == "6":
             t = Table(show_header=False)
             t.add_row("Корень проекта", str(root))
-            t.add_row("default_settings", str(root / "config" / "default_settings.yaml"))
-            t.add_row("settings (если есть)", str(root / "config" / "settings.yaml"))
+            t.add_row("дефолты (встроены в settings.py)", str(SETTINGS_SOURCE_PATH))
+            t.add_row("settings (переопределения, если есть)", str(root / "config" / "settings.yaml"))
             console.print(t)
         elif choice == "7":
             orch.reload_settings()
@@ -663,8 +687,8 @@ def _run_menu_rpc_client(host: str, port: int) -> None:
                         if len(rest) == 3:
                             t = Table(show_header=False)
                             t.add_row("Корень проекта", rest[0])
-                            t.add_row("default_settings", rest[1])
-                            t.add_row("settings (если есть)", rest[2])
+                            t.add_row("дефолты (встроены в settings.py)", rest[1])
+                            t.add_row("settings (переопределения, если есть)", rest[2])
                             console.print(t)
                         continue
                     console.print(f"[green]{payload}[/green]")

@@ -1,9 +1,10 @@
-"""Прокси «9 static»: gala_9static_proxy + порт 60{port_order}{suffix}, ADS payload."""
+"""Прокси «9 static»: gala_9static_proxy + порт {port_prefix}{suffix} (5 цифр), ADS payload."""
 
 from __future__ import annotations
 
 import atexit
 import logging
+import re
 import threading
 import weakref
 from contextlib import contextmanager
@@ -41,6 +42,16 @@ def _atexit_release_all_proxy_suffixes() -> None:
 
 atexit.register(_atexit_release_all_proxy_suffixes)
 
+# Уже заданный в ADS суффикс « - {порт}» снимаем, чтобы при смене прокси не дублировать.
+_ADS_PROFILE_PORT_SUFFIX = re.compile(r" - \d+$")
+
+
+def format_ads_profile_name(account_name: str, proxy_port: int) -> str:
+    """Имя профиля ADS: «{имя} - {порт}» (лимит ADS на name — 100 символов)."""
+    base = _ADS_PROFILE_PORT_SUFFIX.sub("", (account_name or "").strip()).strip()
+    label = base or "profile"
+    return f"{label} - {proxy_port}"[:100]
+
 
 @dataclass(frozen=True)
 class ProxyLine:
@@ -64,6 +75,19 @@ class ProxyLine:
         user_proxy_type = "socks5" if t == "socks5" else "http"
         return {
             "user_proxy_type": user_proxy_type,
+            "proxy_host": self.host,
+            "proxy_port": str(self.port),
+            "proxy_user": self.username or "",
+            "proxy_password": self.password or "",
+        }
+
+    def to_ads_user_proxy_config(self) -> dict[str, str]:
+        """Формат ``user_proxy_config`` для ``/api/v1/user/create`` (proxy_soft / proxy_type / …)."""
+        t = (self.proxy_type or "socks5").lower()
+        proxy_type = "socks5" if t == "socks5" else "http"
+        return {
+            "proxy_soft": "other",
+            "proxy_type": proxy_type,
             "proxy_host": self.host,
             "proxy_port": str(self.port),
             "proxy_user": self.username or "",
@@ -135,7 +159,7 @@ class ProxyAllocator:
     def acquire(self, account_name: str) -> ProxyAcquisition | None:
         attempts = max(1, self._settings.proxy.max_retries_per_profile)
         host_ip = (self._settings.proxy.host or "").strip()
-        port_order = int(self._settings.proxy.port_order)
+        port_prefix = int(self._settings.proxy.port_prefix)
         isp = (self._settings.proxy.isp or "").strip()
         use_today = bool(self._settings.proxy.use_today_list)
         cwd = worker_proxy_cwd()
@@ -152,7 +176,7 @@ class ProxyAllocator:
                     self._shared_suffixes,
                     tid,
                     host_ip,
-                    port_order,
+                    port_prefix,
                 )
 
                 ok, _err = validate_and_activate_proxy(

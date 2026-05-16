@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "ADS Power cookie farming bot with Playwright and Google Sheets"
 requires-python = ">=3.10"
 dependencies = [
+    "ai-dont-care-about-cookies>=1.1.0",
+    "tldextract>=5.1.0",
+    "tzdata>=2024.1",
     "playwright>=1.40.0",
     "google-api-python-client>=2.100.0",
     "google-auth>=2.23.0",

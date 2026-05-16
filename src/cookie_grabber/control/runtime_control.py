@@ -15,11 +15,16 @@ class RunControl:
     safe_stop: threading.Event = field(default_factory=threading.Event)
     shutdown: threading.Event = field(default_factory=threading.Event)
     pause: threading.Event = field(default_factory=threading.Event)
+    profile_quota_lock: threading.Lock = field(default_factory=threading.Lock)
+    accounts_per_run_limit: int = 0
+    profiles_started_this_run: int = 0
 
-    def prepare_new_run(self) -> None:
+    def prepare_new_run(self, accounts_per_run: int = 0) -> None:
         self.safe_stop.clear()
         self.shutdown.clear()
         self.pause.clear()
+        self.accounts_per_run_limit = max(0, int(accounts_per_run))
+        self.profiles_started_this_run = 0
 
 
 def interruptible_sleep(seconds: float, control: RunControl | None, slice_sec: float = 0.15) -> bool:

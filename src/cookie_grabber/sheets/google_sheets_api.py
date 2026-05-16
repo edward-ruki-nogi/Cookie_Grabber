@@ -14,6 +14,7 @@ from cookie_grabber.sheets.atomic import (
     execute_sheets_op_with_quota_retry,
     sheets_service_from_service_account,
 )
+from cookie_grabber.sheets.cell_text import normalize_sheet_cell_scalar
 from cookie_grabber.sheets.models import ProfileRow
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,10 @@ def now_london_iso(settings: AppSettings) -> str:
     return datetime.now(tz).replace(microsecond=0).isoformat()
 
 
-def today_london_iso_date(settings: AppSettings) -> str:
+def today_london_sheet_date(settings: AppSettings) -> str:
+    """Календарная дата для ячейки таблицы (dd.MM.YYYY), часовой пояс из настроек."""
     tz = ZoneInfo(settings.timezone)
-    return datetime.now(tz).date().isoformat()
+    return datetime.now(tz).strftime("%d.%m.%Y")
 
 
 def column_letter_to_index(col: str) -> int:
@@ -57,6 +59,10 @@ def column_index_to_letter(idx: int) -> str:
 
 
 _CELL_RE = re.compile(r"^\s*([A-Za-z]+)\s*(\d+)\s*$")
+
+# Длительности в этих колонках пишем/читаем как h:mm (например 1:05); остальные — число секунд.
+_HMM_DURATION_COLUMNS = frozenset({"C", "E", "K", "L", "M", "N", "O", "P"})
+_HMM_CELL_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d{1,2})\s*$")
 
 
 def _parse_cell(cell: str) -> tuple[str, int]:
@@ -90,6 +96,37 @@ def _to_int(raw: Any) -> int:
         return 0
 
 
+def _column_letter_key(col: str) -> str:
+    return col.strip().upper()
+
+
+def _format_seconds_hmm_column(column: str, seconds: float) -> Any:
+    """Для колонок из ``_HMM_DURATION_COLUMNS`` — строка ``h:mm``; иначе секунды числом."""
+    if _column_letter_key(column) not in _HMM_DURATION_COLUMNS:
+        return round(float(seconds), 3)
+    total = max(0, int(round(float(seconds))))
+    h = total // 3600
+    m = (total % 3600) // 60
+    return f"{h}:{m:02d}"
+
+
+def _sheet_cell_seconds(raw: Any, column: str) -> float:
+    """Секунды из ячейки: для hmm-колонок разбор ``h:mm``, иначе как float (в т.ч. старые числа)."""
+    if _column_letter_key(column) not in _HMM_DURATION_COLUMNS:
+        return _to_float(raw)
+    s = normalize_sheet_cell_scalar(raw)
+    if not s:
+        return 0.0
+    m = _HMM_CELL_RE.match(s)
+    if m:
+        h = int(m.group(1))
+        minutes = int(m.group(2))
+        if minutes >= 60:
+            return _to_float(raw)
+        return float(h * 3600 + minutes * 60)
+    return _to_float(raw)
+
+
 class GoogleSheetsApi:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -117,33 +154,51 @@ class GoogleSheetsApi:
         values = result.get("values") or []
         if not values or not values[0]:
             return ""
-        return str(values[0][0]).strip()
+        return normalize_sheet_cell_scalar(values[0][0])
 
-    def _get_row_values(self, columns: list[str], row: int) -> list[str]:
-        if not columns:
+    def _batch_get_first_cells(self, ranges_a1: list[str]) -> list[str]:
+        """Один HTTP-вызов: по каждому A1 только первая ячейка, порядок = порядку ``ranges``.
+
+        Не использовать один ``get`` на диапазон от min до max колонки: API Sheets отбрасывает
+        крайние пустые ячейки, из-за этого значения могут «съехать» (напр. статус из F попадёт
+        как имя из A).
+        """
+        if not ranges_a1:
             return []
-        idxs = [column_letter_to_index(c) for c in columns]
-        lo, hi = min(idxs), max(idxs)
-        start_l = column_index_to_letter(lo)
-        end_l = column_index_to_letter(hi)
-        rng = f"'{_escape_sheet(self._sheet)}'!{start_l}{row}:{end_l}{row}"
 
         def op() -> dict[str, Any]:
             return (
                 self._service.spreadsheets()
                 .values()
-                .get(spreadsheetId=self.gs.spreadsheet_id, range=rng)
+                .batchGet(
+                    spreadsheetId=self.gs.spreadsheet_id,
+                    ranges=ranges_a1,
+                    majorDimension="ROWS",
+                )
                 .execute()
             )
 
         result = execute_sheets_op_with_quota_retry(op, lock=self._lock)
-        row_vals = (result.get("values") or [[]])[0]
-        width = hi - lo + 1
-        padded = list(row_vals) + [""] * (width - len(row_vals))
         out: list[str] = []
-        for i in idxs:
-            out.append(str(padded[i - lo]).strip())
-        return out
+        for vr in result.get("valueRanges", []):
+            vals = vr.get("values") or []
+            if vals and vals[0]:
+                out.append(normalize_sheet_cell_scalar(vals[0][0]))
+            else:
+                out.append("")
+        while len(out) < len(ranges_a1):
+            out.append("")
+        return out[: len(ranges_a1)]
+
+    def _get_row_values(self, columns: list[str], row: int) -> list[str]:
+        if not columns:
+            return []
+        stripped: list[str] = []
+        for c in columns:
+            column_letter_to_index(c)
+            stripped.append(c.strip().upper())
+        ranges = [_a1(self._sheet, col_l, row) for col_l in stripped]
+        return self._batch_get_first_cells(ranges)
 
     def _batch_update(self, updates: list[tuple[str, list[list[Any]]]]) -> None:
         batch_update_raw(self._service, self.gs.spreadsheet_id, updates, lock=self._lock)
@@ -213,14 +268,14 @@ class GoogleSheetsApi:
             return {}
         vals = self._get_row_values(cols, row)
         out: dict[str, float] = {}
-        out["total"] = _to_float(vals[0])
+        out["total"] = _sheet_cell_seconds(vals[0], cols[0])
         out["sessions"] = float(_to_int(vals[1]))
-        out["mass"] = _to_float(vals[2])
+        out["mass"] = _sheet_cell_seconds(vals[2], cols[2])
         i = 3
         for sid in important_ids:
             if sid not in self.gs.important_site_columns:
                 continue
-            out[sid] = _to_float(vals[i])
+            out[sid] = _sheet_cell_seconds(vals[i], cols[i])
             i += 1
         return out
 
@@ -244,6 +299,16 @@ class GoogleSheetsApi:
             [(_a1(self._sheet, self.gs.ads_profile_id_column, row), [[profile_id]])]
         )
 
+    def read_window_layout_cell(self, row: int) -> str:
+        return self._get_value(
+            _a1(self._sheet, self.gs.window_layout_column, row),
+        )
+
+    def write_window_layout_cell(self, row: int, value: str) -> None:
+        self._batch_update(
+            [(_a1(self._sheet, self.gs.window_layout_column, row), [[value]])]
+        )
+
     def commit_session_row(
         self,
         row: int,
@@ -254,7 +319,8 @@ class GoogleSheetsApi:
         status_after: str,
     ) -> None:
         """Шаги 6/7 алгоритма: накопительно прибавить дельты к M/N/O/K/E,
-        D += 1, B = today London, C = last_seconds, F = status_after.
+        D += 1, B = дата dd.MM.YYYY (London tz), C = длительность сессии (h:mm),
+        E = суммарное время (h:mm), F = status_after.
         Один read + один RAW batchUpdate под общим ``_lock``."""
         gs = self.gs
         important_ids = [sid for sid in important_deltas.keys() if sid in gs.important_site_columns]
@@ -265,32 +331,42 @@ class GoogleSheetsApi:
             *[gs.important_site_columns[sid] for sid in important_ids],
         ]
         cur = self._get_row_values(cols, row)
-        cur_total = _to_float(cur[0])
+        cur_total = _sheet_cell_seconds(cur[0], cols[0])
         cur_sessions = _to_int(cur[1])
-        cur_mass = _to_float(cur[2])
+        cur_mass = _sheet_cell_seconds(cur[2], cols[2])
         new_imp: dict[str, float] = {}
         for idx, sid in enumerate(important_ids):
-            new_imp[sid] = _to_float(cur[3 + idx]) + float(important_deltas.get(sid, 0.0))
+            col_l = cols[3 + idx]
+            new_imp[sid] = _sheet_cell_seconds(cur[3 + idx], col_l) + float(
+                important_deltas.get(sid, 0.0)
+            )
 
-        date_iso = today_london_iso_date(self.settings)
+        date_dmy = today_london_sheet_date(self.settings)
         new_total = cur_total + float(last_seconds)
         new_sessions = cur_sessions + 1
         new_mass = cur_mass + float(mass_delta)
 
         updates: list[tuple[str, list[list[Any]]]] = [
-            (_a1(self._sheet, gs.last_date_column, row), [[date_iso]]),
-            (_a1(self._sheet, gs.last_seconds_column, row), [[round(float(last_seconds), 3)]]),
+            (_a1(self._sheet, gs.last_date_column, row), [[date_dmy]]),
+            (
+                _a1(self._sheet, gs.last_seconds_column, row),
+                [[_format_seconds_hmm_column(gs.last_seconds_column, last_seconds)]],
+            ),
             (_a1(self._sheet, gs.sessions_count_column, row), [[new_sessions]]),
-            (_a1(self._sheet, gs.total_seconds_column, row), [[round(new_total, 3)]]),
-            (_a1(self._sheet, gs.mass_total_column, row), [[round(new_mass, 3)]]),
+            (
+                _a1(self._sheet, gs.total_seconds_column, row),
+                [[_format_seconds_hmm_column(gs.total_seconds_column, new_total)]],
+            ),
+            (
+                _a1(self._sheet, gs.mass_total_column, row),
+                [[_format_seconds_hmm_column(gs.mass_total_column, new_mass)]],
+            ),
             (_a1(self._sheet, gs.status_column, row), [[status_after]]),
         ]
         for sid, val in new_imp.items():
+            col = gs.important_site_columns[sid]
             updates.append(
-                (
-                    _a1(self._sheet, gs.important_site_columns[sid], row),
-                    [[round(float(val), 3)]],
-                )
+                (_a1(self._sheet, col, row), [[_format_seconds_hmm_column(col, float(val))]]),
             )
         self._batch_update(updates)
 
@@ -349,7 +425,8 @@ class GoogleSheetsApi:
                 continue
             imp: dict[str, float] = {}
             for site_id, ci in important_cols.items():
-                imp[site_id] = _to_float(cell(ci))
+                col_l = self.gs.important_site_columns[site_id]
+                imp[site_id] = _sheet_cell_seconds(cell(ci), col_l)
             rows.append(
                 ProfileRow(
                     row_index=row_index,
@@ -358,7 +435,9 @@ class GoogleSheetsApi:
                     notes=cell(notes_ci),
                     last_update=cell(lu_ci),
                     important_seconds=imp,
-                    mass_seconds=_to_float(cell(mass_ci)),
+                    mass_seconds=_sheet_cell_seconds(
+                        cell(mass_ci), self.gs.mass_total_column
+                    ),
                 )
             )
         return rows
@@ -376,12 +455,20 @@ class GoogleSheetsApi:
             (_a1(self._sheet, self.gs.status_column, row_index), [[status]]),
             (_a1(self._sheet, self.gs.notes_column, row_index), [[notes]]),
             (_a1(self._sheet, self.gs.last_update_column, row_index), [[ts]]),
-            (_a1(self._sheet, self.gs.mass_total_column, row_index), [[mass_total]]),
+            (
+                _a1(self._sheet, self.gs.mass_total_column, row_index),
+                [[_format_seconds_hmm_column(self.gs.mass_total_column, mass_total)]],
+            ),
         ]
         for site_id, sec in important_totals.items():
             col = self.gs.important_site_columns.get(site_id)
             if not col:
                 logger.warning("Unknown important site id %s — skip column", site_id)
                 continue
-            data.append((_a1(self._sheet, col, row_index), [[sec]]))
+            data.append(
+                (
+                    _a1(self._sheet, col, row_index),
+                    [[_format_seconds_hmm_column(col, float(sec))]],
+                )
+            )
         self._batch_update(data)
