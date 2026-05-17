@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
+from cookie_grabber.behavior.browser_pages import close_extra_browser_pages
 from cookie_grabber.behavior.cdp_mouse import cdp_click
 from cookie_grabber.behavior.timing import random_action_delay
 from cookie_grabber.config.settings import AppSettings
@@ -21,9 +22,46 @@ from cookie_grabber.farming.navigation import (
     pick_internal_navigation_locator,
     registered_domain,
 )
+from gala_9static_proxy.validator import StopAfter9ProxyDialog
+
 from cookie_grabber.farming.selectors import find_cookie_accept_candidates
+from cookie_grabber.grabber_proxy import FarmingProxyHold
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_proxy_before_entry_fallback(
+    proxy_hold: FarmingProxyHold | None,
+    *,
+    task_label: str | None,
+    entry_url: str,
+) -> bool:
+    """Проверка/активация прокси перед ``goto(entry_url)``. ``True`` — можно переходить."""
+    if proxy_hold is None:
+        return True
+    label = task_label or "нагул"
+    try:
+        ok = proxy_hold.allocator.ensure_proxy_valid(
+            proxy_hold.acquisition,
+            proxy_hold.account_name,
+        )
+    except StopAfter9ProxyDialog:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Нагул [%s]: ошибка проверки/активации прокси перед entry_url %s: %s",
+            label,
+            entry_url,
+            exc,
+        )
+        return False
+    if not ok:
+        logger.warning(
+            "Нагул [%s]: прокси не валиден после активации — переход на entry_url пропущен (%s)",
+            label,
+            entry_url,
+        )
+    return ok
 
 
 def _try_click_locator(
@@ -85,6 +123,7 @@ def farm_single_url_for_minutes(
     *,
     referer: str | None = None,
     task_label: str | None = None,
+    proxy_hold: FarmingProxyHold | None = None,
 ) -> float:
     """Сессия нагула на одном входном URL до исчерпания бюджета минут или остановки."""
     if minutes <= 0:
@@ -92,8 +131,17 @@ def farm_single_url_for_minutes(
     t0 = time.perf_counter()
     try:
         return farm_site_session(
-            page, url, settings, control, minutes, referer=referer, task_label=task_label
+            page,
+            url,
+            settings,
+            control,
+            minutes,
+            referer=referer,
+            task_label=task_label,
+            proxy_hold=proxy_hold,
         )
+    except StopAfter9ProxyDialog:
+        raise
     except Exception as exc:
         logger.exception("farm_site_session %s: %s", url, exc)
         return max(0.0, time.perf_counter() - t0)
@@ -108,6 +156,7 @@ def farm_site_session(
     *,
     referer: str | None = None,
     task_label: str | None = None,
+    proxy_hold: FarmingProxyHold | None = None,
 ) -> float:
     """Один заход: goto → cookie (таймаут) → цикл внутренних переходов с engagement до дедлайна."""
     t0 = time.perf_counter()
@@ -137,6 +186,7 @@ def farm_site_session(
         page.bring_to_front()
     except Exception as exc:
         logger.debug("bring_to_front: %s", exc)
+    close_extra_browser_pages(page, task_label=label)
 
     goto_kwargs: dict = {
         "wait_until": "domcontentloaded",
@@ -232,6 +282,10 @@ def farm_site_session(
                     page.url,
                     entry_url,
                 )
+            if not _ensure_proxy_before_entry_fallback(
+                proxy_hold, task_label=label, entry_url=entry_url
+            ):
+                continue
             try:
                 page.goto(
                     entry_url,
@@ -312,6 +366,7 @@ def farm_single_url(
         page.bring_to_front()
     except Exception as exc:
         logger.debug("bring_to_front: %s", exc)
+    close_extra_browser_pages(page)
 
     goto_kwargs: dict = {
         "wait_until": "domcontentloaded",

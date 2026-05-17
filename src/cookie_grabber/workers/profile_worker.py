@@ -35,7 +35,7 @@ from cookie_grabber.behavior.cdp_mouse import install_synthetic_mouse_overlay
 from cookie_grabber.config.settings import AppSettings, ImportantSite
 from cookie_grabber.control.runtime_control import RunControl, interruptible_sleep
 from cookie_grabber.farming.flow import farm_single_url_for_minutes
-from cookie_grabber.grabber_proxy import ProxyAllocator, format_ads_profile_name
+from cookie_grabber.grabber_proxy import FarmingProxyHold, ProxyAllocator, format_ads_profile_name
 from cookie_grabber.sheets.cell_text import labels_equal, normalize_sheet_cell_scalar
 from cookie_grabber.sheets.google_sheets_api import GoogleSheetsApi
 
@@ -145,6 +145,7 @@ def _farm_important(
     settings: AppSettings,
     control: RunControl,
     site_id: str,
+    proxy_hold: FarmingProxyHold | None = None,
 ) -> float:
     """Запуск важного сайта, возвращает прожитое wall-clock время (сек)."""
     site = _important_by_id(settings, site_id)
@@ -171,7 +172,10 @@ def _farm_important(
             minutes,
             referer=referer,
             task_label=f"важный:{site_id}",
+            proxy_hold=proxy_hold,
         )
+    except StopAfter9ProxyDialog:
+        raise
     except Exception as exc:
         logger.exception("farm важный %s (%s) ошибка: %s", site_id, site.url, exc)
         return 0.0
@@ -181,6 +185,7 @@ def _farm_mass(
     page: Any,
     settings: AppSettings,
     control: RunControl,
+    proxy_hold: FarmingProxyHold | None = None,
 ) -> float:
     minutes = settings.farming.mass_sites_minutes_per_site
     if minutes <= 0:
@@ -209,7 +214,10 @@ def _farm_mass(
                 control,
                 minutes,
                 task_label="массовка",
+                proxy_hold=proxy_hold,
             )
+        except StopAfter9ProxyDialog:
+            raise
         except Exception as exc:
             logger.exception("farm массовка %s ошибка: %s", url, exc)
     return max(0.0, time.perf_counter() - t0)
@@ -335,6 +343,11 @@ def _process_one_row(
                 return "no_proxy"
 
             ads_profile_name = format_ads_profile_name(account_name, acq.proxy.port)
+            proxy_hold = FarmingProxyHold(
+                allocator=allocator,
+                acquisition=acq,
+                account_name=hold_key,
+            )
 
             if need_create_profile and not active_profile_id:
                 created = _ensure_profile(
@@ -421,16 +434,22 @@ def _process_one_row(
 
                         # п.3: PP
                         if not _skip_new_farming_tasks(control):
-                            delta_pp = _farm_important(page, settings, control, "PP")
+                            delta_pp = _farm_important(
+                                page, settings, control, "PP", proxy_hold=proxy_hold
+                            )
                         # п.4: WH
                         if not _skip_new_farming_tasks(control):
-                            delta_wh = _farm_important(page, settings, control, "WH")
+                            delta_wh = _farm_important(
+                                page, settings, control, "WH", proxy_hold=proxy_hold
+                            )
                         # п.5: Kwiff
                         if not _skip_new_farming_tasks(control):
-                            delta_kwiff = _farm_important(page, settings, control, "Kwiff")
+                            delta_kwiff = _farm_important(
+                                page, settings, control, "Kwiff", proxy_hold=proxy_hold
+                            )
                         # п.6: массовка
                         if not _skip_new_farming_tasks(control):
-                            delta_mass = _farm_mass(page, settings, control)
+                            delta_mass = _farm_mass(page, settings, control, proxy_hold=proxy_hold)
                     finally:
                         try:
                             n_tabs = _close_all_browser_tabs(browser)

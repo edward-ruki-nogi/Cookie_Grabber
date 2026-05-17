@@ -224,6 +224,65 @@ class ProxyAllocator:
 
         return None
 
+    def ensure_proxy_valid(self, acq: ProxyAcquisition, account_name: str) -> bool:
+        """Проверка socks5; при невалидности — активация через API 9 static (тот же порт)."""
+        host = acq.proxy.host
+        port_str = str(acq.proxy.port)
+        isp = (self._settings.proxy.isp or "").strip()
+        use_today = bool(self._settings.proxy.use_today_list)
+        cwd = worker_proxy_cwd()
+        acc = (account_name or "").strip() or "account"
+
+        try:
+            wait_unban_if_needed(self._timeout_state, cwd, acc)
+            ok, _err = validate_and_activate_proxy(
+                host,
+                port_str,
+                "9 static",
+                isp,
+                acc,
+                validation_timeout_state=self._timeout_state,
+                run_mode=ProxyRunMode.CHECK_ONLY,
+                cwd=cwd,
+                today_list_cache=self._today_list_cache if use_today else None,
+                use_today_list=use_today,
+            )
+            if ok:
+                logger.debug("proxy check OK for %s on %s:%s", acc, host, port_str)
+                return True
+
+            logger.info(
+                "Прокси невалиден для %s (%s:%s) — активация через API 9 static",
+                acc,
+                host,
+                port_str,
+            )
+            ok, err = validate_and_activate_proxy(
+                host,
+                port_str,
+                "9 static",
+                isp,
+                acc,
+                validation_timeout_state=self._timeout_state,
+                run_mode=ProxyRunMode.STANDARD,
+                cwd=cwd,
+                today_list_cache=self._today_list_cache if use_today else None,
+                use_today_list=use_today,
+            )
+            if ok:
+                logger.info("Прокси активирован для %s: %s:%s", acc, host, port_str)
+            else:
+                logger.warning(
+                    "Прокси остаётся невалидным после активации для %s (%s:%s): %s",
+                    acc,
+                    host,
+                    port_str,
+                    err,
+                )
+            return ok
+        except StopAfter9ProxyDialog:
+            raise
+
     def release(self, port_token: str) -> None:
         tid = threading.get_ident()
         self._port_pool.release(port_token)
@@ -235,6 +294,15 @@ class ProxyAllocator:
     def close(self) -> None:
         """Освободить все ещё учтённые суффиксы (жёсткий стоп / завершение оркестратора)."""
         self._release_all_tracked_suffixes()
+
+
+@dataclass(frozen=True)
+class FarmingProxyHold:
+    """Прокси, удерживаемый на время сессии нагула (для повторной проверки/активации)."""
+
+    allocator: ProxyAllocator
+    acquisition: ProxyAcquisition
+    account_name: str
 
 
 def build_validation_timeout_state(settings: AppSettings) -> ValidationTimeoutState:
