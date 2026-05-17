@@ -48,16 +48,23 @@ class Orchestrator:
         self._shared_port_pool: ProxyPortPool | None = None
         self._shared_today_list_cache: TodayListCache | None = None
 
-    def start(self) -> None:
+    def start(self) -> str | None:
+        """Запуск пула воркеров. ``None`` — успех, иначе текст ошибки для UI."""
         with self._exec_lock:
             if not (self.settings.google_sheets.spreadsheet_id or "").strip():
-                logger.warning("Заполните google_sheets.spreadsheet_id в config/settings.yaml")
-                return
+                msg = "Заполните google_sheets.spreadsheet_id в config/settings.yaml"
+                logger.warning(msg)
+                return msg
             if self._executor is not None:
-                logger.warning("Уже запущено. Дождитесь остановки или завершите (shutdown).")
-                return
+                msg = "Уже запущено. Дождитесь остановки или завершите (shutdown)."
+                logger.warning(msg)
+                return msg
 
-            sheets = GoogleSheetsApi(self.settings)
+            try:
+                sheets = GoogleSheetsApi(self.settings)
+            except FileNotFoundError as exc:
+                logger.error("%s", exc)
+                return str(exc)
             self.control.prepare_new_run(self.settings.accounts_per_run)
             port_pool = ProxyPortPool()
             timeout_state = build_validation_timeout_state(self.settings)
@@ -94,6 +101,7 @@ class Orchestrator:
                 args=(futs_snapshot,),
                 daemon=True,
             ).start()
+            return None
 
     def pause(self) -> None:
         self.control.pause.set()
@@ -256,7 +264,9 @@ def _menu_inline(root: Path) -> None:
         )
         choice = console.input("> ").strip()
         if choice == "1":
-            orch.start()
+            err = orch.start()
+            if err:
+                console.print(f"[red]{err}[/red]")
         elif choice == "2":
             orch.pause()
         elif choice == "3":
@@ -397,8 +407,10 @@ def _sites_remote_submenu(rf, wf) -> None:
 
 def _dispatch_rpc(cmd: str, orch: Orchestrator) -> tuple[str, str]:
     if cmd == "START":
-        orch.start()
-        return "OK", "Команда «Запуск» отправлена (смотрите логи в терминале Cursor)."
+        err = orch.start()
+        if err:
+            return "ERR", err
+        return "OK", "Команда «Запуск» отправлена (смотрите логи в консоли хоста)."
     if cmd == "PAUSE":
         orch.pause()
         return "OK", "Пауза."
