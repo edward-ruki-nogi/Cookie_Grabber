@@ -21,7 +21,11 @@ from cookie_grabber.ui.theme import (
     UI_FONT_HEAD as _UI_FONT_HEAD,
     UI_FONT_SM as _UI_FONT_SM,
 )
-from cookie_grabber.updates.github_release import check_for_update, download_and_stage_update
+from cookie_grabber.updates.github_release import (
+    check_for_update,
+    download_and_stage_update,
+    write_gui_pid_for_update,
+)
 from cookie_grabber.config.settings import (
     PROXY_ISP_ANY,
     PROXY_ISP_VIRGIN,
@@ -890,6 +894,10 @@ def run_gui_client(host: str, port: int) -> None:
         ):
             _finish_update_button()
             return
+        try:
+            write_gui_pid_for_update()
+        except OSError:
+            pass
         kind, msg = rpc(f"APPLY_UPDATE\t{staged.resolve()}")
         if kind != "OK":
             # Хост мог закрыть сокет сразу после старта updater — считаем успехом.
@@ -900,7 +908,8 @@ def run_gui_client(host: str, port: int) -> None:
         messagebox.showinfo(
             "Обновление",
             "Установка запущена. Окно закроется, файлы обновятся и программа запустится снова.\n\n"
-            "Если не стартовала — см. .update_staging\\apply_update.log",
+            "Перед обновлением закройте cookie-grabber в Cursor/терминале на этом ПК.\n\n"
+            "Лог: .update_staging\\apply_update.log (должна быть строка apply_update v3).",
         )
         _quit_for_update()
 

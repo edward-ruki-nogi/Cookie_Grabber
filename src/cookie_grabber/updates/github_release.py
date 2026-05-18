@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -160,6 +161,28 @@ def _apply_update_script() -> Path:
     raise FileNotFoundError("Не найден apply_update.bat рядом с exe или в scripts/.")
 
 
+def write_gui_pid_for_update() -> None:
+    """GUI вызывает перед ``APPLY_UPDATE``, чтобы bat ждал только этот процесс + хост."""
+    staging = application_root() / STAGING_DIR_NAME
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "gui.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+
+def _write_wait_pids_file(target: Path) -> Path:
+    staging = target / STAGING_DIR_NAME
+    staging.mkdir(parents=True, exist_ok=True)
+    pids: set[int] = {os.getpid()}
+    gui_pid_file = staging / "gui.pid"
+    if gui_pid_file.is_file():
+        try:
+            pids.add(int(gui_pid_file.read_text(encoding="utf-8").strip()))
+        except ValueError:
+            pass
+    pids_file = staging / "wait_pids.txt"
+    pids_file.write_text("\n".join(str(p) for p in sorted(pids)), encoding="utf-8")
+    return pids_file
+
+
 def launch_apply_update(staged_payload_dir: Path) -> None:
     if sys.platform != "win32":
         raise OSError("Автоустановка обновления поддерживается только на Windows.")
@@ -172,7 +195,7 @@ def launch_apply_update(staged_payload_dir: Path) -> None:
         raise FileNotFoundError(f"Не найден CookieGrabber.exe: {exe_path}")
 
     script = _apply_update_script()
-    # cmd /c — иначе .bat с DETACHED_PROCESS часто не стартует; ждём все CookieGrabber.exe в bat.
+    pids_file = _write_wait_pids_file(target)
     args = [
         "cmd.exe",
         "/c",
@@ -180,6 +203,7 @@ def launch_apply_update(staged_payload_dir: Path) -> None:
         str(target),
         str(staged_payload_dir.resolve()),
         str(exe_path.resolve()),
+        str(pids_file.resolve()),
     ]
     log_dir = target / STAGING_DIR_NAME
     log_dir.mkdir(parents=True, exist_ok=True)
