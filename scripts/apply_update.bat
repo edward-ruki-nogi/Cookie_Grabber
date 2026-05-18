@@ -1,12 +1,17 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-REM %1 = target dir (install folder)
-REM %2 = staging payload dir (extracted update)
-REM %3 = exe to restart (full path)
+REM Старый launcher (4 args): %1 target, %2 staging, %3 pid, %4 exe
+REM Новый launcher (3 args): %1 target, %2 staging, %3 exe
 
 set "TARGET=%~1"
 set "STAGING=%~2"
-set "EXE=%~3"
+if not "%~4"=="" (
+  set "EXE=%~4"
+) else (
+  set "EXE=%~3"
+)
+if not exist "%EXE%" set "EXE=%TARGET%\CookieGrabber.exe"
+
 set "LOG=%TARGET%\.update_staging\apply_update.log"
 
 if not exist "%TARGET%\.update_staging" mkdir "%TARGET%\.update_staging" 2>nul
@@ -14,9 +19,15 @@ echo === apply_update %DATE% %TIME% === > "%LOG%"
 echo TARGET=%TARGET%>>"%LOG%"
 echo STAGING=%STAGING%>>"%LOG%"
 echo EXE=%EXE%>>"%LOG%"
+if not "%~4"=="" (echo ARG4=%~4>>"%LOG%")
 
 if not exist "%STAGING%\CookieGrabber.exe" (
   echo ERROR: payload missing CookieGrabber.exe >>"%LOG%"
+  exit /b 1
+)
+
+if not exist "%EXE%" (
+  echo ERROR: exe not found: %EXE%>>"%LOG%"
   exit /b 1
 )
 
