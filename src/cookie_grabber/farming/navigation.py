@@ -109,7 +109,8 @@ def link_zone_weight_score(page: Page, locator: Locator) -> float:
                         return 3;
                 }
                 return 2;
-            }"""
+            }""",
+            timeout=5000,
         )
     except Exception:
         return 1.0

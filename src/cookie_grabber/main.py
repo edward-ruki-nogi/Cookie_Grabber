@@ -22,7 +22,12 @@ from cookie_grabber.config.settings import (
     save_settings_patch,
 )
 from cookie_grabber.control.runtime_control import RunControl
-from cookie_grabber.log_bus import LogBus, setup_logging
+from cookie_grabber.log_bus import (
+    LogBus,
+    init_worker_file_logging,
+    reset_worker_file_logging,
+    setup_logging,
+)
 from gala_9static_proxy import ProxyPortPool, TodayListCache
 
 from cookie_grabber.grabber_proxy import ProxyAllocator, build_validation_timeout_state
@@ -79,7 +84,12 @@ class Orchestrator:
             )
 
             n = max(1, int(self.settings.threads))
-            self._executor = ThreadPoolExecutor(max_workers=n, thread_name_prefix="acc")
+            reset_worker_file_logging()
+            self._executor = ThreadPoolExecutor(
+                max_workers=n,
+                thread_name_prefix="acc",
+                initializer=init_worker_file_logging,
+            )
             self._futures = []
             self._shared_ads = []
             for _ in range(n):
@@ -175,6 +185,7 @@ class Orchestrator:
             self._shared_allocator = None
         self._shared_port_pool = None
         self._shared_today_list_cache = None
+        reset_worker_file_logging()
 
     def request_shutdown(self) -> None:
         with self._exec_lock:
@@ -187,6 +198,18 @@ class Orchestrator:
                 finally:
                     self._cleanup_shared()
         logger.info("Резкая остановка (флаг shutdown + cancel futures).")
+
+    def ui_status(self) -> str:
+        """Краткий статус для GUI."""
+        with self._exec_lock:
+            running = self._executor is not None
+            if not running:
+                return "остановлен"
+            if self.control.shutdown.is_set():
+                return "запрошен стоп"
+            if self.control.safe_stop.is_set():
+                return "запрошена безопасная остановка"
+            return "Проект в работе"
 
     def toggle_important_site(self, site_id: str) -> bool | None:
         """Переключить ``enabled`` для важного сайта и сохранить в ``settings.yaml``.
@@ -429,6 +452,8 @@ def _dispatch_rpc(cmd: str, orch: Orchestrator) -> tuple[str, str]:
     if cmd == "RELOAD":
         orch.reload_settings()
         return "OK", "Перезагрузка выполнена (или см. ошибки в терминале Cursor)."
+    if cmd == "STATUS":
+        return "OK", orch.ui_status()
     if cmd == "SITES":
         rows = orch.list_important_sites()
         # Формат: id|enabled(0/1)|url ; разделитель между сайтами — '\u001f'
@@ -487,15 +512,19 @@ def _run_menu_rpc_host(project_root: Path) -> None:
         fr = conn.makefile("r", encoding="utf-8", newline="\n")
         fw = conn.makefile("w", encoding="utf-8", newline="\n")
         try:
-            for line in fr:
-                cmd = line.strip()
-                if not cmd:
-                    continue
-                kind, payload = _dispatch_rpc(cmd, orch)
-                fw.write(f"{kind}\t{payload}\n")
-                fw.flush()
-                if cmd == "QUIT":
-                    break
+            try:
+                for line in fr:
+                    cmd = line.strip()
+                    if not cmd:
+                        continue
+                    kind, payload = _dispatch_rpc(cmd, orch)
+                    fw.write(f"{kind}\t{payload}\n")
+                    fw.flush()
+                    if cmd == "QUIT":
+                        break
+            except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                logger.warning("Соединение с клиентом меню закрыто: %s", exc)
+                _log_gui_stderr_tail(project_root)
         finally:
             fw.close()
             fr.close()
@@ -594,15 +623,19 @@ def _rpc_host_menu_fallback(project_root: Path) -> None:
         fr = conn.makefile("r", encoding="utf-8", newline="\n")
         fw = conn.makefile("w", encoding="utf-8", newline="\n")
         try:
-            for line in fr:
-                cmd = line.strip()
-                if not cmd:
-                    continue
-                kind, payload = _dispatch_rpc(cmd, orch)
-                fw.write(f"{kind}\t{payload}\n")
-                fw.flush()
-                if cmd == "QUIT":
-                    break
+            try:
+                for line in fr:
+                    cmd = line.strip()
+                    if not cmd:
+                        continue
+                    kind, payload = _dispatch_rpc(cmd, orch)
+                    fw.write(f"{kind}\t{payload}\n")
+                    fw.flush()
+                    if cmd == "QUIT":
+                        break
+            except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                logger.warning("Соединение с клиентом меню закрыто: %s", exc)
+                _log_gui_stderr_tail(project_root)
         finally:
             fw.close()
             fr.close()
@@ -705,6 +738,12 @@ def _run_menu_rpc_client(host: str, port: int) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
+
+    if "--log-viewer" in argv:
+        from cookie_grabber.log_viewer import main as run_log_viewer
+
+        run_log_viewer(argv)
+        return
 
     if "--gui-client" in argv:
         i = argv.index("--gui-client")

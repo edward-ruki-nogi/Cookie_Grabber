@@ -8,3 +8,4 @@ gui_client_last_error.log
 dist/
 build/
 .update_staging/
+logs/

@@ -126,7 +126,8 @@ def _hover_and_maybe_safe_click(
                 if (tag === 'input') return ['checkbox','radio','range','button'].includes(type) ? 2 : 1;
                 if (el.getAttribute('role') === 'switch') return 2;
                 return 1;
-            }"""
+            }""",
+            timeout=5000,
         )
     except Exception:
         return

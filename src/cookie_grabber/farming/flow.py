@@ -24,10 +24,21 @@ from cookie_grabber.farming.navigation import (
 )
 from gala_9static_proxy.validator import StopAfter9ProxyDialog
 
+from cookie_grabber.farming.playwright_nav import (
+    goto_bounded,
+    is_chrome_error_page,
+    is_stuck_launcher_url,
+)
 from cookie_grabber.farming.selectors import find_cookie_accept_candidates
 from cookie_grabber.grabber_proxy import FarmingProxyHold
 
 logger = logging.getLogger(__name__)
+
+# Не крутить engagement на стартовой вкладке дольше этого после неудачного goto.
+_LAUNCHER_STUCK_ABORT_SEC = 90.0
+_MAX_ENTRY_GOTO_FAILURES = 5
+_ENTRY_GOTO_ATTEMPTS = 3
+_ENTRY_GOTO_RETRY_DELAY_SEC = 2.0
 
 
 def _ensure_proxy_before_entry_fallback(
@@ -62,6 +73,68 @@ def _ensure_proxy_before_entry_fallback(
             entry_url,
         )
     return ok
+
+
+def _goto_entry_with_retries(
+    page: Page,
+    entry_url: str,
+    settings: AppSettings,
+    control: RunControl | None,
+    *,
+    referer: str | None,
+    task_label: str | None,
+    proxy_hold: FarmingProxyHold | None,
+) -> bool:
+    """Переход на entry_url: проверка прокси и до нескольких повторов при сбое SOCKS/сети."""
+    label = (task_label or "").strip() or None
+    suffix = f" [{label}]" if label else ""
+
+    for attempt in range(1, _ENTRY_GOTO_ATTEMPTS + 1):
+        if control is not None and control.shutdown.is_set():
+            return False
+
+        if proxy_hold is not None:
+            if not _ensure_proxy_before_entry_fallback(
+                proxy_hold, task_label=label, entry_url=entry_url
+            ):
+                if attempt < _ENTRY_GOTO_ATTEMPTS:
+                    logger.info(
+                        "Нагул%s: прокси не готов перед %s — повтор %s/%s",
+                        suffix,
+                        entry_url,
+                        attempt,
+                        _ENTRY_GOTO_ATTEMPTS,
+                    )
+                    if interruptible_sleep(_ENTRY_GOTO_RETRY_DELAY_SEC, control):
+                        return False
+                continue
+
+        if goto_bounded(page, entry_url, settings, referer=referer):
+            if not is_chrome_error_page(page.url):
+                return True
+            logger.warning(
+                "Нагул%s: после goto осталась страница ошибки Chrome (%s) — %s",
+                suffix,
+                page.url,
+                entry_url,
+            )
+        elif not is_chrome_error_page(page.url) and not is_stuck_launcher_url(page.url):
+            return True
+
+        if attempt >= _ENTRY_GOTO_ATTEMPTS:
+            break
+        logger.info(
+            "Нагул%s: не удалось открыть %s (вкладка: %s) — повтор %s/%s",
+            suffix,
+            entry_url,
+            page.url,
+            attempt,
+            _ENTRY_GOTO_ATTEMPTS,
+        )
+        if interruptible_sleep(_ENTRY_GOTO_RETRY_DELAY_SEC, control):
+            return False
+
+    return False
 
 
 def _try_click_locator(
@@ -188,13 +261,22 @@ def farm_site_session(
         logger.debug("bring_to_front: %s", exc)
     close_extra_browser_pages(page, task_label=label)
 
-    goto_kwargs: dict = {
-        "wait_until": "domcontentloaded",
-        "timeout": settings.navigation_timeout_ms,
-    }
-    if referer:
-        goto_kwargs["referer"] = referer
-    page.goto(entry_url, **goto_kwargs)
+    if not _goto_entry_with_retries(
+        page,
+        entry_url,
+        settings,
+        control,
+        referer=referer,
+        task_label=label,
+        proxy_hold=proxy_hold,
+    ):
+        logger.warning(
+            "Нагул%s: не удалось открыть entry_url %s (URL вкладки: %s) — задание прервано",
+            f" [{label}]" if label else "",
+            entry_url,
+            page.url,
+        )
+        return max(0.0, time.perf_counter() - t0)
 
     if control is not None and control.shutdown.is_set():
         return max(0.0, time.perf_counter() - t0)
@@ -222,6 +304,10 @@ def farm_site_session(
     _cookie_banner_phase(page, settings, control)
 
     nav = 0
+    entry_goto_failures = 0
+    launcher_stuck_since: float | None = (
+        time.monotonic() if is_stuck_launcher_url(page.url) else None
+    )
     while time.monotonic() < deadline:
         if control is not None:
             if control.shutdown.is_set():
@@ -253,6 +339,20 @@ def farm_site_session(
         if control is not None and (control.shutdown.is_set() or control.safe_stop.is_set()):
             break
 
+        if is_stuck_launcher_url(page.url):
+            if launcher_stuck_since is None:
+                launcher_stuck_since = time.monotonic()
+            elif time.monotonic() - launcher_stuck_since >= _LAUNCHER_STUCK_ABORT_SEC:
+                logger.warning(
+                    "Нагул%s: вкладка остаётся на стартовой/пустой странице (%s) > %.0f с — выход",
+                    f" [{label}]" if label else "",
+                    page.url,
+                    _LAUNCHER_STUCK_ABORT_SEC,
+                )
+                break
+        else:
+            launcher_stuck_since = None
+
         picked = pick_internal_navigation_locator(page, session)
         if picked is None:
             tl = max(0.0, deadline - time.monotonic())
@@ -282,27 +382,25 @@ def farm_site_session(
                     page.url,
                     entry_url,
                 )
-            if not _ensure_proxy_before_entry_fallback(
-                proxy_hold, task_label=label, entry_url=entry_url
+            if not _goto_entry_with_retries(
+                page,
+                entry_url,
+                settings,
+                control,
+                referer=referer,
+                task_label=label,
+                proxy_hold=proxy_hold,
             ):
-                continue
-            try:
-                page.goto(
-                    entry_url,
-                    wait_until="domcontentloaded",
-                    timeout=settings.navigation_timeout_ms,
-                )
-            except Exception as exc:
-                if label:
+                entry_goto_failures += 1
+                if entry_goto_failures >= _MAX_ENTRY_GOTO_FAILURES:
                     logger.warning(
-                        "Нагул [%s]: не удалось открыть entry_url %s: %s",
-                        label,
-                        entry_url,
-                        exc,
+                        "Нагул%s: %s подряд неудачных переходов на entry_url — выход",
+                        f" [{label}]" if label else "",
+                        entry_goto_failures,
                     )
-                else:
-                    logger.warning("Нагул: не удалось открыть entry_url %s: %s", entry_url, exc)
+                    break
                 continue
+            entry_goto_failures = 0
             if control is not None and control.shutdown.is_set():
                 break
             try:
@@ -368,13 +466,8 @@ def farm_single_url(
         logger.debug("bring_to_front: %s", exc)
     close_extra_browser_pages(page)
 
-    goto_kwargs: dict = {
-        "wait_until": "domcontentloaded",
-        "timeout": settings.navigation_timeout_ms,
-    }
-    if referer:
-        goto_kwargs["referer"] = referer
-    page.goto(url, **goto_kwargs)
+    if not goto_bounded(page, url, settings, referer=referer):
+        return max(0.0, time.perf_counter() - t0)
     if control is not None and control.shutdown.is_set():
         return max(0.0, time.perf_counter() - t0)
 

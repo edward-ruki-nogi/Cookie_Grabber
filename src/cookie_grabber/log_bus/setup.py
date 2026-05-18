@@ -4,6 +4,8 @@ import logging
 import queue
 import threading
 
+from cookie_grabber.log_bus.worker_files import ensure_host_file_logging
+
 
 class LogBus:
     def __init__(self, maxsize: int = 2000) -> None:
@@ -59,4 +61,5 @@ def setup_logging(bus: LogBus | None = None, level: int = logging.INFO) -> LogBu
     qh = QueueHandler(bus)
     qh.setFormatter(fmt)
     root.addHandler(qh)
+    ensure_host_file_logging(fmt)
     return bus

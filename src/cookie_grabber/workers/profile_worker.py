@@ -34,7 +34,9 @@ from cookie_grabber.browser_window import (
 from cookie_grabber.behavior.cdp_mouse import install_synthetic_mouse_overlay
 from cookie_grabber.config.settings import AppSettings, ImportantSite
 from cookie_grabber.control.runtime_control import RunControl, interruptible_sleep
+from cookie_grabber.log_bus import set_worker_panel_label
 from cookie_grabber.farming.flow import farm_single_url_for_minutes
+from cookie_grabber.farming.playwright_nav import apply_page_timeouts
 from cookie_grabber.grabber_proxy import FarmingProxyHold, ProxyAllocator, format_ads_profile_name
 from cookie_grabber.sheets.cell_text import labels_equal, normalize_sheet_cell_scalar
 from cookie_grabber.sheets.google_sheets_api import GoogleSheetsApi
@@ -322,6 +324,7 @@ def _process_one_row(
         return "no_profile_id"
 
     hold_key = (account_name or active_profile_id or f"row_{row}").strip() or f"row_{row}"
+    set_worker_panel_label(account=account_name or hold_key, row=row)
 
     # прокси (суффикс порта всегда возвращается в пул при выходе из with, см. hold_proxy)
     delta_pp = delta_wh = delta_kwiff = delta_mass = 0.0
@@ -343,6 +346,7 @@ def _process_one_row(
                 return "no_proxy"
 
             ads_profile_name = format_ads_profile_name(account_name, acq.proxy.port)
+            set_worker_panel_label(account=account_name or hold_key, row=row, proxy_port=acq.proxy.port)
             proxy_hold = FarmingProxyHold(
                 allocator=allocator,
                 acquisition=acq,
@@ -425,6 +429,7 @@ def _process_one_row(
                                 exc,
                             )
                         page = context.pages[0] if context.pages else context.new_page()
+                        apply_page_timeouts(page, settings)
 
                         if settings.farming.show_synthetic_mouse:
                             try:

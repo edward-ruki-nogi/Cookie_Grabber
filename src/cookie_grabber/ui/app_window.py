@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -9,7 +10,17 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, messagebox
 
-from cookie_grabber.runtime_paths import application_root
+from cookie_grabber.runtime_paths import application_root, log_viewer_argv
+from cookie_grabber.ui.theme import (
+    C as _C,
+    UI_CORNER as _UI_CORNER,
+    UI_CORNER_SM as _UI_CORNER_SM,
+    UI_FONT as _UI_FONT,
+    UI_FONT_BTN as _UI_FONT_BTN,
+    UI_FONT_COUNTER as _UI_FONT_COUNTER,
+    UI_FONT_HEAD as _UI_FONT_HEAD,
+    UI_FONT_SM as _UI_FONT_SM,
+)
 from cookie_grabber.updates.github_release import (
     check_for_update,
     download_and_stage_update,
@@ -37,6 +48,41 @@ _DEFAULT_SITE_URLS: dict[str, str] = {
     "Kwiff": "https://www.kwiff.com/",
 }
 _ACCOUNTS_PER_RUN_INF = "\u221e"  # ∞ в поле «Выполнений» для безлимита (в YAML хранится 0)
+
+
+def _btn_kw(variant: str = "default") -> dict:
+    """Общие параметры CTkButton по варианту."""
+    if variant == "start":
+        fg, hov = _C["start"], _C["start_hover"]
+    elif variant == "stop":
+        fg, hov = _C["stop"], _C["stop_hover"]
+    else:
+        fg, hov = _C["btn"], _C["btn_hover"]
+    font = _UI_FONT_COUNTER if variant == "counter" else _UI_FONT_BTN
+    return {
+        "fg_color": fg,
+        "hover_color": hov,
+        "font": font,
+        "text_color": _C["text"],
+        "corner_radius": _UI_CORNER,
+    }
+
+
+def _entry_kw() -> dict:
+    return {
+        "font": _UI_FONT,
+        "text_color": _C["text"],
+        "fg_color": _C["entry"],
+        "border_color": _C["border"],
+        "corner_radius": _UI_CORNER_SM,
+    }
+
+
+def _label_kw(*, heading: bool = False, muted: bool = False) -> dict:
+    return {
+        "font": _UI_FONT_HEAD if heading else _UI_FONT,
+        "text_color": _C["accent"] if heading else (_C["muted"] if muted else _C["text"]),
+    }
 
 
 def _parse_accounts_per_run_display(raw: str) -> int:
@@ -101,9 +147,9 @@ def run_gui_client(host: str, port: int) -> None:
 
     ctk = ctk_loc
     ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
+    ctk.set_default_color_theme("dark-blue")
 
-    root = ctk.CTk()
+    root = ctk.CTk(fg_color=_C["bg"])
     root.title("Cookie Grabber")
 
     def rpc(cmd: str) -> tuple[str, str]:
@@ -119,6 +165,10 @@ def run_gui_client(host: str, port: int) -> None:
 
     entries: dict[str, ctk.CTkEntry] = {}
     site_check_vars: dict[str, BooleanVar] = {}
+    status_sv = StringVar(value="Статус: остановлен")
+
+    def set_status(text: str) -> None:
+        status_sv.set(f"Статус: {text}")
 
     def add_labeled_entry(
         master: ctk.CTkScrollableFrame,
@@ -127,8 +177,8 @@ def run_gui_client(host: str, port: int) -> None:
         key: str,
         width: int = 420,
     ) -> None:
-        ctk.CTkLabel(master, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
-        e = ctk.CTkEntry(master, width=width)
+        ctk.CTkLabel(master, text=label, **_label_kw()).grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        e = ctk.CTkEntry(master, width=width, **_entry_kw())
         e.grid(row=row, column=1, sticky="ew", padx=8, pady=4)
         entries[key] = e
 
@@ -328,6 +378,7 @@ def run_gui_client(host: str, port: int) -> None:
             messagebox.showerror("Старт", msg)
         else:
             messagebox.showinfo("Старт", msg)
+            set_status("Проект в работе")
 
     def on_safe() -> None:
         kind, msg = rpc("SAFE_STOP")
@@ -335,6 +386,7 @@ def run_gui_client(host: str, port: int) -> None:
             messagebox.showerror("Завершение", msg)
         else:
             messagebox.showinfo("Завершение", msg)
+            set_status("запрошена безопасная остановка")
 
     def on_shutdown() -> None:
         kind, msg = rpc("SHUTDOWN")
@@ -342,31 +394,65 @@ def run_gui_client(host: str, port: int) -> None:
             messagebox.showerror("Стоп", msg)
         else:
             messagebox.showinfo("Стоп", msg)
+            set_status("запрошен стоп")
 
     def on_save_only() -> None:
         if do_save(reload_host=True):
             messagebox.showinfo("Сохранить", "Настройки записаны и перезагружены на хосте.")
 
-    green = ("#2FA572", "#1F7A4A")
-    green_h = ("#38B882", "#258A5E")
+    def on_log_viewer() -> None:
+        try:
+            workers = _parse_int(entries["thr_threads"].get(), "threads")
+            workers = max(1, min(64, workers))
+        except ValueError:
+            workers = 2
+        try:
+            ent_lr = entries.get("thr_log_refresh")
+            raw = int(ent_lr.get().strip()) if ent_lr else 0
+            refresh_ms = 1500 if raw <= 0 else max(800, min(60_000, raw))
+        except (ValueError, AttributeError):
+            refresh_ms = 1500
+        cmd = log_viewer_argv(workers, refresh_ms)
+        try:
+            subprocess.Popen(cmd, cwd=str(project_root))
+        except Exception as exc:
+            messagebox.showerror("Просмотр логов", str(exc))
 
-    ctk.CTkButton(toolbar, text="Старт", command=on_start, fg_color=green, hover_color=green_h, width=100).pack(
-        side="left", padx=4
+    toolbar.grid_columnconfigure(0, weight=1, uniform="toolbar")
+    toolbar.grid_columnconfigure(1, weight=1, uniform="toolbar")
+    toolbar.grid_columnconfigure(2, weight=1, uniform="toolbar")
+
+    ctk.CTkButton(toolbar, text="Старт", command=on_start, width=100, **_btn_kw("start")).grid(
+        row=0, column=0, padx=4
     )
-    ctk.CTkButton(toolbar, text="Завершение", command=on_safe, width=110).pack(side="left", padx=4)
-    ctk.CTkButton(
-        toolbar,
-        text="Стоп",
-        command=on_shutdown,
-        fg_color=("gray35", "#5c2121"),
-        hover_color=("gray45", "#7a2828"),
-    ).pack(side="left", padx=4)
-    ctk.CTkButton(toolbar, text="Сохранить", command=on_save_only, width=100).pack(side="left", padx=4)
+    ctk.CTkButton(toolbar, text="Завершение", command=on_safe, width=110, **_btn_kw()).grid(
+        row=0, column=1, padx=4
+    )
+    ctk.CTkButton(toolbar, text="Стоп", command=on_shutdown, **_btn_kw("stop")).grid(
+        row=0, column=2, padx=4
+    )
 
     settings_visible: list[bool] = [False]
-    settings_frame = ctk.CTkFrame(root)
+    settings_frame = ctk.CTkFrame(
+        root,
+        fg_color=_C["surface"],
+        border_width=1,
+        border_color=_C["border"],
+        corner_radius=_UI_CORNER,
+    )
+    bottom_toolbar = ctk.CTkFrame(root, fg_color="transparent")
 
-    tv = ctk.CTkTabview(settings_frame)
+    tv = ctk.CTkTabview(
+        settings_frame,
+        fg_color=_C["surface"],
+        segmented_button_fg_color=_C["surface2"],
+        segmented_button_selected_color=_C["accent"],
+        segmented_button_selected_hover_color=_C["accent_hover"],
+        segmented_button_unselected_color=_C["surface2"],
+        segmented_button_unselected_hover_color=_C["btn_hover"],
+        text_color=_C["text"],
+        text_color_disabled=_C["muted"],
+    )
     tv.pack(fill="both", expand=True, padx=4, pady=4)
 
     tab_main = tv.add("Основные")
@@ -379,12 +465,14 @@ def run_gui_client(host: str, port: int) -> None:
     show_cursor_bv = BooleanVar(value=False)
     proxy_isp_sv = StringVar(value=PROXY_ISP_VIRGIN)
 
-    fm = ctk.CTkScrollableFrame(tab_main)
+    fm = ctk.CTkScrollableFrame(tab_main, fg_color=_C["surface"], label_text_color=_C["text"])
     fm.pack(fill="both", expand=True)
     fm.grid_columnconfigure(1, weight=1)
 
     row_m = 0
-    ctk.CTkLabel(fm, text="Google Sheets", font=("", 13, "bold")).grid(row=row_m, column=0, columnspan=2, sticky="w", pady=(0, 4))
+    ctk.CTkLabel(fm, text="Google Sheets", **_label_kw(heading=True)).grid(
+        row=row_m, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4)
+    )
     row_m += 1
     add_labeled_entry(fm, row_m, "spreadsheet_id", "gs_spreadsheet_id")
     row_m += 1
@@ -394,10 +482,16 @@ def run_gui_client(host: str, port: int) -> None:
         fm,
         text="Отображение курсора",
         variable=show_cursor_bv,
+        font=_UI_FONT,
+        text_color=_C["text"],
+        fg_color=_C["accent"],
+        hover_color=_C["accent_hover"],
+        border_color=_C["border"],
+        checkmark_color=_C["text"],
     ).grid(row=row_m, column=0, columnspan=2, sticky="w", padx=8, pady=4)
     row_m += 1
 
-    ft = ctk.CTkScrollableFrame(tab_thr)
+    ft = ctk.CTkScrollableFrame(tab_thr, fg_color=_C["surface"], label_text_color=_C["text"])
     ft.pack(fill="both", expand=True)
     ft.grid_columnconfigure(1, weight=1)
     rt = 0
@@ -415,7 +509,7 @@ def run_gui_client(host: str, port: int) -> None:
         ent.delete(0, "end")
         ent.insert(0, str(v))
 
-    ctk.CTkLabel(ft, text="Потоков").grid(row=rt, column=0, sticky="w", padx=8, pady=4)
+    ctk.CTkLabel(ft, text="Потоков", **_label_kw()).grid(row=rt, column=0, sticky="w", padx=8, pady=4)
     row_threads = ctk.CTkFrame(ft, fg_color="transparent")
     row_threads.grid(row=rt, column=1, sticky="w", padx=8, pady=4)
     ctk.CTkButton(
@@ -423,10 +517,10 @@ def run_gui_client(host: str, port: int) -> None:
         text="−",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_threads(-1),
+        **_btn_kw("counter"),
     ).pack(side="left", padx=(0, 6))
-    e_threads = ctk.CTkEntry(row_threads, width=100, justify="center", height=26)
+    e_threads = ctk.CTkEntry(row_threads, width=100, justify="center", height=26, **_entry_kw())
     e_threads.pack(side="left", padx=(0, 6))
     entries["thr_threads"] = e_threads
     e_threads.insert(0, "2")
@@ -435,8 +529,8 @@ def run_gui_client(host: str, port: int) -> None:
         text="+",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_threads(1),
+        **_btn_kw("counter"),
     ).pack(side="left")
     rt += 1
 
@@ -452,7 +546,7 @@ def run_gui_client(host: str, port: int) -> None:
         ent.delete(0, "end")
         ent.insert(0, _ACCOUNTS_PER_RUN_INF if v == 0 else str(v))
 
-    ctk.CTkLabel(ft, text="Выполнений").grid(row=rt, column=0, sticky="w", padx=8, pady=4)
+    ctk.CTkLabel(ft, text="Выполнений", **_label_kw()).grid(row=rt, column=0, sticky="w", padx=8, pady=4)
     row_apr = ctk.CTkFrame(ft, fg_color="transparent")
     row_apr.grid(row=rt, column=1, sticky="w", padx=8, pady=4)
     ctk.CTkButton(
@@ -460,10 +554,10 @@ def run_gui_client(host: str, port: int) -> None:
         text="−",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_accounts_per_run(-1),
+        **_btn_kw("counter"),
     ).pack(side="left", padx=(0, 6))
-    e_apr = ctk.CTkEntry(row_apr, width=100, justify="center", height=26)
+    e_apr = ctk.CTkEntry(row_apr, width=100, justify="center", height=26, **_entry_kw())
     e_apr.pack(side="left", padx=(0, 6))
     entries["thr_accounts_per_run"] = e_apr
     e_apr.insert(0, _ACCOUNTS_PER_RUN_INF)
@@ -472,8 +566,8 @@ def run_gui_client(host: str, port: int) -> None:
         text="+",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_accounts_per_run(1),
+        **_btn_kw("counter"),
     ).pack(side="left")
     rt += 1
 
@@ -481,8 +575,14 @@ def run_gui_client(host: str, port: int) -> None:
     rt += 1
     add_labeled_entry(ft, rt, "action_delay_sec_max", "thr_delay_max")
     rt += 1
+    add_labeled_entry(ft, rt, "Обновление логов (мс)", "thr_log_refresh")
+    ent_lr = entries.get("thr_log_refresh")
+    if ent_lr:
+        ent_lr.delete(0, "end")
+        ent_lr.insert(0, "1500")
+    rt += 1
 
-    fj = ctk.CTkScrollableFrame(tab_job)
+    fj = ctk.CTkScrollableFrame(tab_job, fg_color=_C["surface"], label_text_color=_C["text"])
     fj.pack(fill="both", expand=True)
     fj.grid_columnconfigure(1, weight=1)
     rj = 0
@@ -492,6 +592,13 @@ def run_gui_client(host: str, port: int) -> None:
         text="Второстепенные сайты",
         command=open_secondary_sites_file,
         width=220,
+        fg_color=_C["surface2"],
+        hover_color=_C["btn_hover"],
+        border_width=1,
+        border_color=_C["border"],
+        font=_UI_FONT_BTN,
+        text_color=_C["text"],
+        corner_radius=_UI_CORNER,
     )
     btn_secondary.grid(row=rj, column=0, columnspan=2, sticky="w", padx=8, pady=8)
     rj += 1
@@ -509,7 +616,9 @@ def run_gui_client(host: str, port: int) -> None:
         ent.delete(0, "end")
         ent.insert(0, str(v))
 
-    ctk.CTkLabel(fj, text="Основные сайты, мин").grid(row=rj, column=0, sticky="w", padx=(8, 2), pady=4)
+    ctk.CTkLabel(fj, text="Основные сайты, мин", **_label_kw()).grid(
+        row=rj, column=0, sticky="w", padx=(8, 2), pady=4
+    )
     row_ji = ctk.CTkFrame(fj, fg_color="transparent")
     row_ji.grid(row=rj, column=1, sticky="w", padx=(0, 8), pady=4)
     ctk.CTkButton(
@@ -517,10 +626,10 @@ def run_gui_client(host: str, port: int) -> None:
         text="−",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_job_minutes("job_important_min", -1),
+        **_btn_kw("counter"),
     ).pack(side="left", padx=(0, 3))
-    e_ji = ctk.CTkEntry(row_ji, width=64, justify="center", height=26)
+    e_ji = ctk.CTkEntry(row_ji, width=64, justify="center", height=26, **_entry_kw())
     e_ji.pack(side="left", padx=(0, 3))
     entries["job_important_min"] = e_ji
     e_ji.insert(0, "5")
@@ -529,8 +638,8 @@ def run_gui_client(host: str, port: int) -> None:
         text="+",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_job_minutes("job_important_min", 1),
+        **_btn_kw("counter"),
     ).pack(side="left")
     rj += 1
 
@@ -546,7 +655,9 @@ def run_gui_client(host: str, port: int) -> None:
         ent.delete(0, "end")
         ent.insert(0, _ACCOUNTS_PER_RUN_INF if v == 0 else str(v))
 
-    ctk.CTkLabel(fj, text="Доп сайты, мин").grid(row=rj, column=0, sticky="w", padx=(8, 2), pady=4)
+    ctk.CTkLabel(fj, text="Доп сайты, мин", **_label_kw()).grid(
+        row=rj, column=0, sticky="w", padx=(8, 2), pady=4
+    )
     row_jm = ctk.CTkFrame(fj, fg_color="transparent")
     row_jm.grid(row=rj, column=1, sticky="w", padx=(0, 8), pady=4)
     ctk.CTkButton(
@@ -554,10 +665,10 @@ def run_gui_client(host: str, port: int) -> None:
         text="−",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_job_minutes("job_mass_min", -1),
+        **_btn_kw("counter"),
     ).pack(side="left", padx=(0, 3))
-    e_jm = ctk.CTkEntry(row_jm, width=64, justify="center", height=26)
+    e_jm = ctk.CTkEntry(row_jm, width=64, justify="center", height=26, **_entry_kw())
     e_jm.pack(side="left", padx=(0, 3))
     entries["job_mass_min"] = e_jm
     e_jm.insert(0, "5")
@@ -566,11 +677,11 @@ def run_gui_client(host: str, port: int) -> None:
         text="+",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_job_minutes("job_mass_min", 1),
+        **_btn_kw("counter"),
     ).pack(side="left")
 
-    ctk.CTkLabel(fj, text="Кол-во").grid(row=rj, column=2, sticky="w", padx=(6, 2), pady=4)
+    ctk.CTkLabel(fj, text="Кол-во", **_label_kw()).grid(row=rj, column=2, sticky="w", padx=(6, 2), pady=4)
     row_jc = ctk.CTkFrame(fj, fg_color="transparent")
     row_jc.grid(row=rj, column=3, sticky="w", padx=(0, 8), pady=4)
     ctk.CTkButton(
@@ -578,10 +689,10 @@ def run_gui_client(host: str, port: int) -> None:
         text="−",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_mass_count(-1),
+        **_btn_kw("counter"),
     ).pack(side="left", padx=(0, 3))
-    e_jc = ctk.CTkEntry(row_jc, width=64, justify="center", height=26)
+    e_jc = ctk.CTkEntry(row_jc, width=64, justify="center", height=26, **_entry_kw())
     e_jc.pack(side="left", padx=(0, 3))
     entries["job_mass_count"] = e_jc
     e_jc.insert(0, _ACCOUNTS_PER_RUN_INF)
@@ -590,12 +701,12 @@ def run_gui_client(host: str, port: int) -> None:
         text="+",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_mass_count(1),
+        **_btn_kw("counter"),
     ).pack(side="left")
     rj += 1
 
-    ctk.CTkLabel(fj, text="Поведение нагула", font=("", 13, "bold")).grid(
+    ctk.CTkLabel(fj, text="Поведение нагула", **_label_kw(heading=True)).grid(
         row=rj, column=0, columnspan=2, sticky="w", padx=8, pady=(12, 4)
     )
     rj += 1
@@ -610,7 +721,7 @@ def run_gui_client(host: str, port: int) -> None:
     add_labeled_entry(fj, rj, "Макс. сек «живых» действий за паузу", "job_engagement_max")
     rj += 1
 
-    ctk.CTkLabel(fj, text="Важные сайты", font=("", 13, "bold")).grid(
+    ctk.CTkLabel(fj, text="Важные сайты", **_label_kw(heading=True)).grid(
         row=rj, column=0, columnspan=2, sticky="w", padx=8, pady=(12, 4)
     )
     rj += 1
@@ -618,7 +729,17 @@ def run_gui_client(host: str, port: int) -> None:
     for site_id in _PICKABLE_SITE_IDS:
         bv = BooleanVar(value=False)
         site_check_vars[site_id] = bv
-        cb = ctk.CTkCheckBox(fj, text=site_id, variable=bv)
+        cb = ctk.CTkCheckBox(
+            fj,
+            text=site_id,
+            variable=bv,
+            font=_UI_FONT,
+            text_color=_C["text"],
+            fg_color=_C["accent"],
+            hover_color=_C["accent_hover"],
+            border_color=_C["border"],
+            checkmark_color=_C["text"],
+        )
         cb.grid(row=rj, column=0, columnspan=2, sticky="w", padx=8, pady=4)
         rj += 1
 
@@ -635,25 +756,43 @@ def run_gui_client(host: str, port: int) -> None:
         ent.delete(0, "end")
         ent.insert(0, str(v))
 
-    fp = ctk.CTkScrollableFrame(tab_proxy)
+    fp = ctk.CTkScrollableFrame(tab_proxy, fg_color=_C["surface"], label_text_color=_C["text"])
     fp.pack(fill="both", expand=True)
     fp.grid_columnconfigure(1, weight=1)
     rp = 0
-    ctk.CTkLabel(fp, text="Источник").grid(row=rp, column=0, sticky="w", padx=8, pady=4)
+    ctk.CTkLabel(fp, text="Источник", **_label_kw()).grid(row=rp, column=0, sticky="w", padx=8, pady=4)
     ctk.CTkOptionMenu(
         fp,
         values=[PROXY_SOURCE_9STATIC],
         variable=proxy_source_sv,
         width=420,
+        font=_UI_FONT,
+        text_color=_C["text"],
+        fg_color=_C["surface2"],
+        button_color=_C["btn"],
+        button_hover_color=_C["btn_hover"],
+        dropdown_fg_color=_C["surface2"],
+        dropdown_text_color=_C["text"],
+        dropdown_hover_color=_C["btn_hover"],
     ).grid(row=rp, column=1, sticky="ew", padx=8, pady=4)
     rp += 1
-    ctk.CTkCheckBox(fp, text="Today list", variable=proxy_today_bv).grid(
-        row=rp, column=0, columnspan=2, sticky="w", padx=8, pady=4
-    )
+    ctk.CTkCheckBox(
+        fp,
+        text="Today list",
+        variable=proxy_today_bv,
+        font=_UI_FONT,
+        text_color=_C["text"],
+        fg_color=_C["accent"],
+        hover_color=_C["accent_hover"],
+        border_color=_C["border"],
+        checkmark_color=_C["text"],
+    ).grid(row=rp, column=0, columnspan=2, sticky="w", padx=8, pady=4)
     rp += 1
     add_labeled_entry(fp, rp, "IP (панель 9proxy)", "proxy_host")
     rp += 1
-    ctk.CTkLabel(fp, text="Порт: первые 3 цифры (100–999)").grid(row=rp, column=0, sticky="w", padx=8, pady=4)
+    ctk.CTkLabel(fp, text="Порт: первые 3 цифры (100–999)", **_label_kw()).grid(
+        row=rp, column=0, sticky="w", padx=8, pady=4
+    )
     counter_row = ctk.CTkFrame(fp, fg_color="transparent")
     counter_row.grid(row=rp, column=1, sticky="w", padx=8, pady=4)
     ctk.CTkButton(
@@ -661,10 +800,10 @@ def run_gui_client(host: str, port: int) -> None:
         text="−",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_proxy_port_prefix(-1),
+        **_btn_kw("counter"),
     ).pack(side="left", padx=(0, 6))
-    e_prefix = ctk.CTkEntry(counter_row, width=100, justify="center", height=26)
+    e_prefix = ctk.CTkEntry(counter_row, width=100, justify="center", height=26, **_entry_kw())
     e_prefix.pack(side="left", padx=(0, 6))
     entries["proxy_port_prefix"] = e_prefix
     e_prefix.insert(0, "600")
@@ -673,16 +812,24 @@ def run_gui_client(host: str, port: int) -> None:
         text="+",
         width=28,
         height=26,
-        font=("", 14),
         command=lambda: bump_proxy_port_prefix(1),
+        **_btn_kw("counter"),
     ).pack(side="left")
     rp += 1
-    ctk.CTkLabel(fp, text="ISP").grid(row=rp, column=0, sticky="w", padx=8, pady=4)
+    ctk.CTkLabel(fp, text="ISP", **_label_kw()).grid(row=rp, column=0, sticky="w", padx=8, pady=4)
     ctk.CTkOptionMenu(
         fp,
         values=[PROXY_ISP_VIRGIN, PROXY_ISP_ANY],
         variable=proxy_isp_sv,
         width=420,
+        font=_UI_FONT,
+        text_color=_C["text"],
+        fg_color=_C["surface2"],
+        button_color=_C["btn"],
+        button_hover_color=_C["btn_hover"],
+        dropdown_fg_color=_C["surface2"],
+        dropdown_text_color=_C["text"],
+        dropdown_hover_color=_C["btn_hover"],
     ).grid(row=rp, column=1, sticky="ew", padx=8, pady=4)
     rp += 1
     add_labeled_entry(fp, rp, "Бан ошибки API (сек, 2× Read timed out)", "proxy_ban_sec")
@@ -698,14 +845,27 @@ def run_gui_client(host: str, port: int) -> None:
             btn_toggle.configure(text="Настройки  ▴")
         fit_window()
 
-    btn_toggle = ctk.CTkButton(toolbar, text="Настройки  ▾", command=toggle_settings, width=130)
-    btn_toggle.pack(side="left", padx=12)
+    bottom_toolbar.grid_columnconfigure(0, weight=1, uniform="bottom_toolbar")
+    bottom_toolbar.grid_columnconfigure(1, weight=1, uniform="bottom_toolbar")
+    bottom_toolbar.grid_columnconfigure(2, weight=1, uniform="bottom_toolbar")
+    bottom_toolbar.grid_columnconfigure(3, weight=1, uniform="bottom_toolbar")
+
+    btn_toggle = ctk.CTkButton(
+        bottom_toolbar, text="Настройки  ▾", command=toggle_settings, width=130, **_btn_kw()
+    )
+    btn_toggle.grid(row=0, column=0, padx=4)
+    ctk.CTkButton(bottom_toolbar, text="Логи", command=on_log_viewer, width=100, **_btn_kw()).grid(
+        row=0, column=1, padx=4
+    )
+    ctk.CTkButton(bottom_toolbar, text="Сохранить", command=on_save_only, width=100, **_btn_kw()).grid(
+        row=0, column=3, padx=4
+    )
 
     update_busy: list[bool] = [False]
 
     def _finish_update_button() -> None:
         update_busy[0] = False
-        btn_update.configure(state="normal", text="Проверить обновление")
+        btn_update.configure(state="normal", text="Апдейт")
 
     def _quit_for_update() -> None:
         try:
@@ -814,23 +974,49 @@ def run_gui_client(host: str, port: int) -> None:
         threading.Thread(target=worker, daemon=True).start()
 
     btn_update = ctk.CTkButton(
-        toolbar,
-        text="Проверить обновление",
+        bottom_toolbar,
+        text="Апдейт",
         command=on_check_update,
-        width=150,
+        width=100,
+        **_btn_kw(),
     )
-    btn_update.pack(side="right", padx=4)
+    btn_update.grid(row=0, column=2, padx=4)
+
+    status_label = ctk.CTkLabel(
+        root,
+        textvariable=status_sv,
+        anchor="w",
+        font=_UI_FONT_SM,
+        text_color=_C["accent"],
+        fg_color=_C["surface2"],
+        corner_radius=_UI_CORNER_SM,
+    )
+    status_label.pack(side="bottom", fill="x", padx=12, pady=(0, 2))
 
     ctk.CTkLabel(
         root,
         text="Логи и воркеры — в терминале Cursor. Окно только для команд и правок настроек.",
-        text_color="gray60",
-    ).pack(fill="x", padx=12, pady=(0, 6))
+        font=_UI_FONT_SM,
+        text_color=_C["muted"],
+    ).pack(side="bottom", fill="x", padx=12, pady=(0, 4))
+    bottom_toolbar.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+
+    status_poll_active: list[bool] = [True]
+
+    def poll_status() -> None:
+        if not status_poll_active[0]:
+            return
+        kind, msg = rpc("STATUS")
+        if kind == "OK":
+            set_status(msg)
+        root.after(1200, poll_status)
 
     load_fields_from_disk()
+    poll_status()
     fit_window()
 
     def on_close() -> None:
+        status_poll_active[0] = False
         try:
             wf.write("QUIT\n")
             wf.flush()
