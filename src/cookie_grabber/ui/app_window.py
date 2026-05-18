@@ -902,7 +902,9 @@ def run_gui_client(host: str, port: int) -> None:
             return
         messagebox.showinfo(
             "Обновление",
-            "Установка запущена. Приложение закроется и откроется снова после замены файлов.",
+            "Установка запущена. Закройте все окна Cookie Grabber (включая консоль с логами).\n"
+            "После замены файлов программа запустится снова.\n\n"
+            "Если не стартовала — см. .update_staging\\apply_update.log",
         )
         _quit_for_update()
 

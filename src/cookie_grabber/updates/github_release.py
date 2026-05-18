@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -169,19 +168,33 @@ def launch_apply_update(staged_payload_dir: Path) -> None:
     exe_path = target / "CookieGrabber.exe"
     if not exe_path.is_file() and getattr(sys, "frozen", False):
         exe_path = Path(sys.executable).resolve()
+    if not exe_path.is_file():
+        raise FileNotFoundError(f"Не найден CookieGrabber.exe: {exe_path}")
 
     script = _apply_update_script()
-    pid = os.getpid()
+    # cmd /c — иначе .bat с DETACHED_PROCESS часто не стартует; ждём все CookieGrabber.exe в bat.
     args = [
+        "cmd.exe",
+        "/c",
         str(script),
         str(target),
         str(staged_payload_dir.resolve()),
-        str(pid),
         str(exe_path.resolve()),
     ]
+    log_dir = target / STAGING_DIR_NAME
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "apply_update_launch.log"
+    try:
+        log_f = log_path.open("a", encoding="utf-8")
+    except OSError:
+        log_f = subprocess.DEVNULL  # type: ignore[assignment]
     subprocess.Popen(
         args,
         cwd=str(target),
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
-        close_fds=True,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,  # type: ignore[attr-defined]
+        close_fds=False,
     )
+    if hasattr(log_f, "close") and log_f not in (subprocess.DEVNULL, sys.stdout, sys.stderr):
+        log_f.close()
