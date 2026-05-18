@@ -12,7 +12,6 @@ if not "%~4"=="" (
 if not exist "%EXE%" set "EXE=%TARGET%\CookieGrabber.exe"
 
 set "LOG=%TARGET%\.update_staging\apply_update.log"
-set "TARGET_PS=%TARGET:\=\\%"
 
 if not exist "%TARGET%\.update_staging" mkdir "%TARGET%\.update_staging" 2>nul
 echo === apply_update %DATE% %TIME% === > "%LOG%"
