@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from gala_9static_proxy import ProxyPortPool, TodayListCache
 from cookie_grabber.grabber_proxy import ProxyAllocator, build_validation_timeout_state
 from cookie_grabber.sheets.google_sheets_api import GoogleSheetsApi
 from cookie_grabber.runtime_paths import application_root, gui_client_argv, menu_client_argv
+from cookie_grabber.updates.github_release import launch_apply_update
 from cookie_grabber.workers.profile_worker import run_account_loop
 
 logger = logging.getLogger(__name__)
@@ -465,6 +467,25 @@ def _dispatch_rpc(cmd: str, orch: Orchestrator) -> tuple[str, str]:
         if new_val is None:
             return "ERR", f"Сайт {sid} не найден"
         return "OK", f"{sid}: enabled = {new_val}"
+    if cmd.startswith("APPLY_UPDATE\t"):
+        staged_raw = cmd.split("\t", 1)[1].strip() if "\t" in cmd else ""
+        if not staged_raw:
+            return "ERR", "Путь к обновлению не указан."
+        staged = Path(staged_raw)
+        if not staged.is_dir():
+            return "ERR", f"Каталог обновления не найден: {staged}"
+        try:
+            orch.request_shutdown()
+            launch_apply_update(staged)
+        except Exception as exc:
+            return "ERR", str(exc)
+
+        def _exit_host_after_apply() -> None:
+            time.sleep(0.4)
+            os._exit(0)
+
+        threading.Thread(target=_exit_host_after_apply, daemon=True).start()
+        return "OK", "Обновление запускается."
     if cmd == "QUIT":
         orch.request_shutdown()
         return "OK", "Выход."

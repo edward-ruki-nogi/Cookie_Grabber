@@ -21,11 +21,7 @@ from cookie_grabber.ui.theme import (
     UI_FONT_HEAD as _UI_FONT_HEAD,
     UI_FONT_SM as _UI_FONT_SM,
 )
-from cookie_grabber.updates.github_release import (
-    check_for_update,
-    download_and_stage_update,
-    launch_apply_update,
-)
+from cookie_grabber.updates.github_release import check_for_update, download_and_stage_update
 from cookie_grabber.config.settings import (
     PROXY_ISP_ANY,
     PROXY_ISP_VIRGIN,
@@ -894,16 +890,16 @@ def run_gui_client(host: str, port: int) -> None:
         ):
             _finish_update_button()
             return
-        try:
-            launch_apply_update(staged)
-        except Exception as exc:
-            messagebox.showerror("Обновление", f"Не удалось запустить установку:\n{exc}")
-            _finish_update_button()
-            return
+        kind, msg = rpc(f"APPLY_UPDATE\t{staged.resolve()}")
+        if kind != "OK":
+            # Хост мог закрыть сокет сразу после старта updater — считаем успехом.
+            if "закрыл соединение" not in (msg or "").lower():
+                messagebox.showerror("Обновление", f"Не удалось запустить установку:\n{msg}")
+                _finish_update_button()
+                return
         messagebox.showinfo(
             "Обновление",
-            "Установка запущена. Закройте все окна Cookie Grabber (включая консоль с логами).\n"
-            "После замены файлов программа запустится снова.\n\n"
+            "Установка запущена. Окно закроется, файлы обновятся и программа запустится снова.\n\n"
             "Если не стартовала — см. .update_staging\\apply_update.log",
         )
         _quit_for_update()

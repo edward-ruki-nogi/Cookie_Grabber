@@ -1,7 +1,6 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-REM Старый launcher (4 args): %1 target, %2 staging, %3 pid, %4 exe
-REM Новый launcher (3 args): %1 target, %2 staging, %3 exe
+REM %1 target, %2 staging, %3 exe (new) OR %3 pid + %4 exe (legacy)
 
 set "TARGET=%~1"
 set "STAGING=%~2"
@@ -13,13 +12,13 @@ if not "%~4"=="" (
 if not exist "%EXE%" set "EXE=%TARGET%\CookieGrabber.exe"
 
 set "LOG=%TARGET%\.update_staging\apply_update.log"
+set "TARGET_PS=%TARGET:\=\\%"
 
 if not exist "%TARGET%\.update_staging" mkdir "%TARGET%\.update_staging" 2>nul
 echo === apply_update %DATE% %TIME% === > "%LOG%"
 echo TARGET=%TARGET%>>"%LOG%"
 echo STAGING=%STAGING%>>"%LOG%"
 echo EXE=%EXE%>>"%LOG%"
-if not "%~4"=="" (echo ARG4=%~4>>"%LOG%")
 
 if not exist "%STAGING%\CookieGrabber.exe" (
   echo ERROR: payload missing CookieGrabber.exe >>"%LOG%"
@@ -31,21 +30,22 @@ if not exist "%EXE%" (
   exit /b 1
 )
 
-echo Waiting for CookieGrabber.exe to exit...>>"%LOG%"
+echo Waiting for CookieGrabber.exe in %TARGET%...>>"%LOG%"
 set /a WAIT=0
-:wait_all
-tasklist /FI "IMAGENAME eq CookieGrabber.exe" 2>nul | find /I "CookieGrabber.exe" >nul
+:wait_target
+powershell -NoProfile -Command ^
+  "$t='%TARGET%'; $n=@(Get-Process -Name CookieGrabber -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ($_.Path.StartsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) }); exit ($n.Count -gt 0 ? 0 : 1)"
 if !ERRORLEVEL!==0 (
   set /a WAIT+=1
-  if !WAIT! GEQ 180 (
-    echo ERROR: timeout waiting for processes >>"%LOG%"
+  if !WAIT! GEQ 120 (
+    echo ERROR: timeout waiting for processes in target folder >>"%LOG%"
     exit /b 1
   )
   timeout /t 1 /nobreak >nul
-  goto wait_all
+  goto wait_target
 )
 
-echo All CookieGrabber.exe stopped.>>"%LOG%"
+echo No CookieGrabber.exe in target folder.>>"%LOG%"
 timeout /t 2 /nobreak >nul
 
 robocopy "%STAGING%" "%TARGET%" /E /IS /IT /NFL /NDL /NJH /NJS /NP >>"%LOG%" 2>&1
