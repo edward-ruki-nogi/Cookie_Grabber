@@ -7,8 +7,24 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
 from cookie_grabber.config.settings import AppSettings
+from cookie_grabber.farming.navigation import registered_domain
 
 logger = logging.getLogger(__name__)
+
+
+def page_on_entry_domain(page: Page, entry_url: str) -> bool:
+    """Вкладка на том же eTLD+1, что и entry_url (или тот же host, если домен не распознан)."""
+    from urllib.parse import urlsplit
+
+    target_rd = registered_domain(entry_url)
+    current_rd = registered_domain(page.url)
+    if target_rd and current_rd:
+        return current_rd == target_rd
+    target_host = urlsplit(entry_url).netloc.lower()
+    current_host = urlsplit(page.url).netloc.lower()
+    if not target_host or not current_host:
+        return False
+    return current_host == target_host or current_host.endswith("." + target_host)
 
 
 def is_chrome_error_page(url: str) -> bool:

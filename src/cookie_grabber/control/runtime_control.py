@@ -20,9 +20,12 @@ class RunControl:
     profiles_started_this_run: int = 0
 
     def prepare_new_run(self, accounts_per_run: int = 0) -> None:
+        from cookie_grabber.stop_flags import clear_stop_flags
+
         self.safe_stop.clear()
         self.shutdown.clear()
         self.pause.clear()
+        clear_stop_flags()
         self.accounts_per_run_limit = max(0, int(accounts_per_run))
         self.profiles_started_this_run = 0
 

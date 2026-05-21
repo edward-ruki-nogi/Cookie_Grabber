@@ -28,6 +28,7 @@ from cookie_grabber.farming.playwright_nav import (
     goto_bounded,
     is_chrome_error_page,
     is_stuck_launcher_url,
+    page_on_entry_domain,
 )
 from cookie_grabber.farming.selectors import find_cookie_accept_candidates
 from cookie_grabber.grabber_proxy import FarmingProxyHold
@@ -36,9 +37,12 @@ logger = logging.getLogger(__name__)
 
 # Не крутить engagement на стартовой вкладке дольше этого после неудачного goto.
 _LAUNCHER_STUCK_ABORT_SEC = 90.0
+_FARM_STALL_ABORT_SEC = 90.0
+_FARM_HEARTBEAT_SEC = 45.0
 _MAX_ENTRY_GOTO_FAILURES = 5
 _ENTRY_GOTO_ATTEMPTS = 3
 _ENTRY_GOTO_RETRY_DELAY_SEC = 2.0
+_POST_GOTO_LOAD_TIMEOUT_MS = 15_000
 
 
 def _ensure_proxy_before_entry_fallback(
@@ -46,15 +50,24 @@ def _ensure_proxy_before_entry_fallback(
     *,
     task_label: str | None,
     entry_url: str,
+    control: RunControl | None = None,
 ) -> bool:
     """Проверка/активация прокси перед ``goto(entry_url)``. ``True`` — можно переходить."""
     if proxy_hold is None:
         return True
+    if control is not None and control.shutdown.is_set():
+        return False
     label = task_label or "нагул"
+    logger.info(
+        "Нагул [%s]: проверка прокси перед переходом на %s",
+        label,
+        entry_url,
+    )
     try:
         ok = proxy_hold.allocator.ensure_proxy_valid(
             proxy_hold.acquisition,
             proxy_hold.account_name,
+            control=control,
         )
     except StopAfter9ProxyDialog:
         raise
@@ -95,7 +108,10 @@ def _goto_entry_with_retries(
 
         if proxy_hold is not None:
             if not _ensure_proxy_before_entry_fallback(
-                proxy_hold, task_label=label, entry_url=entry_url
+                proxy_hold,
+                task_label=label,
+                entry_url=entry_url,
+                control=control,
             ):
                 if attempt < _ENTRY_GOTO_ATTEMPTS:
                     logger.info(
@@ -110,16 +126,22 @@ def _goto_entry_with_retries(
                 continue
 
         if goto_bounded(page, entry_url, settings, referer=referer):
-            if not is_chrome_error_page(page.url):
+            if is_chrome_error_page(page.url):
+                logger.warning(
+                    "Нагул%s: после goto осталась страница ошибки Chrome (%s) — %s",
+                    suffix,
+                    page.url,
+                    entry_url,
+                )
+            elif page_on_entry_domain(page, entry_url):
                 return True
-            logger.warning(
-                "Нагул%s: после goto осталась страница ошибки Chrome (%s) — %s",
-                suffix,
-                page.url,
-                entry_url,
-            )
-        elif not is_chrome_error_page(page.url) and not is_stuck_launcher_url(page.url):
-            return True
+            else:
+                logger.warning(
+                    "Нагул%s: goto завершился, но вкладка не на домене %s (URL: %s)",
+                    suffix,
+                    entry_url,
+                    page.url,
+                )
 
         if attempt >= _ENTRY_GOTO_ATTEMPTS:
             break
@@ -135,6 +157,15 @@ def _goto_entry_with_retries(
             return False
 
     return False
+
+
+def _wait_page_settled(page: Page, settings: AppSettings, *, context: str) -> None:
+    """Короткое ожидание DOM после goto (networkidle на «тяжёлых» сайтах часто не наступает)."""
+    ms = min(_POST_GOTO_LOAD_TIMEOUT_MS, int(settings.navigation_timeout_ms))
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=ms)
+    except PlaywrightTimeout:
+        logger.debug("domcontentloaded timeout (%s) для %s", context, page.url)
 
 
 def _try_click_locator(
@@ -281,10 +312,25 @@ def farm_site_session(
     if control is not None and control.shutdown.is_set():
         return max(0.0, time.perf_counter() - t0)
 
-    try:
-        page.wait_for_load_state("networkidle", timeout=settings.network_idle_timeout_ms)
-    except PlaywrightTimeout:
-        logger.debug("networkidle timeout for %s", entry_url)
+    if not page_on_entry_domain(page, entry_url):
+        logger.warning(
+            "Нагул%s: вкладка не на целевом сайте %s (URL: %s) — задание прервано",
+            f" [{label}]" if label else "",
+            entry_url,
+            page.url,
+        )
+        return max(0.0, time.perf_counter() - t0)
+
+    if label:
+        logger.info(
+            "Нагул [%s]: открыт entry_url, фактический URL: %s",
+            label,
+            page.url,
+        )
+    else:
+        logger.info("Нагул: открыт entry_url, фактический URL: %s", page.url)
+
+    _wait_page_settled(page, settings, context="entry")
 
     random_action_delay(settings.action_delay_sec_min, settings.action_delay_sec_max, control)
     simulate_reading_along_text(page, settings, control)
@@ -308,7 +354,29 @@ def farm_site_session(
     launcher_stuck_since: float | None = (
         time.monotonic() if is_stuck_launcher_url(page.url) else None
     )
+    last_heartbeat = time.monotonic()
+    stall_url = normalize_visit_url(page.url)
+    stall_since = time.monotonic()
     while time.monotonic() < deadline:
+        now_mono = time.monotonic()
+        if now_mono - last_heartbeat >= _FARM_HEARTBEAT_SEC:
+            if label:
+                logger.info(
+                    "Нагул [%s]: heartbeat — URL=%s, осталось %.0f с, переходов=%s",
+                    label,
+                    page.url,
+                    max(0.0, deadline - now_mono),
+                    nav,
+                )
+            else:
+                logger.info(
+                    "Нагул: heartbeat — URL=%s, осталось %.0f с, переходов=%s",
+                    page.url,
+                    max(0.0, deadline - now_mono),
+                    nav,
+                )
+            last_heartbeat = now_mono
+
         if control is not None:
             if control.shutdown.is_set():
                 break
@@ -339,6 +407,9 @@ def farm_site_session(
         if control is not None and (control.shutdown.is_set() or control.safe_stop.is_set()):
             break
 
+        loop_nav = nav
+        loop_url = normalize_visit_url(page.url)
+
         if is_stuck_launcher_url(page.url):
             if launcher_stuck_since is None:
                 launcher_stuck_since = time.monotonic()
@@ -354,6 +425,14 @@ def farm_site_session(
             launcher_stuck_since = None
 
         picked = pick_internal_navigation_locator(page, session)
+        if picked is None and time.monotonic() - stall_since >= _FARM_STALL_ABORT_SEC:
+            logger.warning(
+                "Нагул%s: нет прогресса на %s > %.0f с (подбор ссылок) — выход",
+                f" [{label}]" if label else "",
+                stall_url or page.url,
+                _FARM_STALL_ABORT_SEC,
+            )
+            break
         if picked is None:
             tl = max(0.0, deadline - time.monotonic())
             run_engagement_during_pause(
@@ -403,10 +482,7 @@ def farm_site_session(
             entry_goto_failures = 0
             if control is not None and control.shutdown.is_set():
                 break
-            try:
-                page.wait_for_load_state("networkidle", timeout=settings.network_idle_timeout_ms)
-            except PlaywrightTimeout:
-                logger.debug("networkidle timeout после возврата на %s", entry_url)
+            _wait_page_settled(page, settings, context="re-entry")
             if label:
                 logger.info(
                     "Нагул [%s]: открыт entry_url, фактический URL: %s",
@@ -443,6 +519,19 @@ def farm_site_session(
                 page.bring_to_front()
             except Exception:
                 pass
+
+        cur_after = normalize_visit_url(page.url)
+        if nav > loop_nav or cur_after != loop_url:
+            stall_url = cur_after
+            stall_since = time.monotonic()
+        elif time.monotonic() - stall_since >= _FARM_STALL_ABORT_SEC:
+            logger.warning(
+                "Нагул%s: нет прогресса на %s > %.0f с — выход из задания",
+                f" [{label}]" if label else "",
+                stall_url or page.url,
+                _FARM_STALL_ABORT_SEC,
+            )
+            break
 
     return max(0.0, time.perf_counter() - t0)
 

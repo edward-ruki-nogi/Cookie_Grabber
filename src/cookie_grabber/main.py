@@ -34,6 +34,7 @@ from gala_9static_proxy import ProxyPortPool, TodayListCache
 from cookie_grabber.grabber_proxy import ProxyAllocator, build_validation_timeout_state
 from cookie_grabber.sheets.google_sheets_api import GoogleSheetsApi
 from cookie_grabber.runtime_paths import application_root, gui_client_argv, menu_client_argv
+from cookie_grabber.stop_flags import write_bad_end_flag, write_safe_stop_flag
 from cookie_grabber.updates.github_release import launch_apply_update
 from cookie_grabber.workers.profile_worker import run_account_loop
 
@@ -132,7 +133,12 @@ class Orchestrator:
 
     def request_safe_stop(self) -> None:
         self.control.safe_stop.set()
-        logger.info("Мягкое завершение (safe_stop): между URL воркеры остановятся.")
+        write_safe_stop_flag()
+        logger.info(
+            "Мягкое завершение (safe_stop): между URL воркеры остановятся "
+            "(флаг %s в каталоге приложения).",
+            "safe_stop.flag",
+        )
         threading.Thread(target=self._await_workers_after_safe_stop, daemon=True).start()
 
     def _await_workers_after_safe_stop(self) -> None:
@@ -190,8 +196,10 @@ class Orchestrator:
         reset_worker_file_logging()
 
     def request_shutdown(self) -> None:
+        self.control.shutdown.set()
+        self.control.safe_stop.set()
+        write_bad_end_flag()
         with self._exec_lock:
-            self.control.shutdown.set()
             self.control.pause.clear()
             ex = self._executor
             if ex is not None:
@@ -199,7 +207,10 @@ class Orchestrator:
                     ex.shutdown(wait=False, cancel_futures=True)
                 finally:
                     self._cleanup_shared()
-        logger.info("Резкая остановка (флаг shutdown + cancel futures).")
+        logger.info(
+            "Резкая остановка (shutdown + cancel futures, флаг %s в каталоге приложения).",
+            "bad_end.flag",
+        )
 
     def ui_status(self) -> str:
         """Краткий статус для GUI."""
@@ -479,12 +490,6 @@ def _dispatch_rpc(cmd: str, orch: Orchestrator) -> tuple[str, str]:
             launch_apply_update(staged)
         except Exception as exc:
             return "ERR", str(exc)
-
-        def _exit_host_after_apply() -> None:
-            time.sleep(0.4)
-            os._exit(0)
-
-        threading.Thread(target=_exit_host_after_apply, daemon=True).start()
         return "OK", "Обновление запускается."
     if cmd == "QUIT":
         orch.request_shutdown()
@@ -501,6 +506,7 @@ def _run_menu_rpc_host(project_root: Path) -> None:
 
     log_bus = LogBus()
     setup_logging(log_bus, level=logging.INFO)
+    os.chdir(project_root)
     orch = Orchestrator(settings, log_bus, project_root)
 
     _preflight_gui_dependencies()
@@ -532,20 +538,34 @@ def _run_menu_rpc_host(project_root: Path) -> None:
         conn.settimeout(None)
         fr = conn.makefile("r", encoding="utf-8", newline="\n")
         fw = conn.makefile("w", encoding="utf-8", newline="\n")
-        try:
+        write_lock = threading.Lock()
+
+        def _handle_cmd(cmd: str) -> tuple[str, str]:
+            with write_lock:
+                kind, payload = _dispatch_rpc(cmd, orch)
+                fw.write(f"{kind}\t{payload}\n")
+                fw.flush()
+            return kind, payload
+
+        def _reader() -> None:
             try:
                 for line in fr:
                     cmd = line.strip()
                     if not cmd:
                         continue
-                    kind, payload = _dispatch_rpc(cmd, orch)
-                    fw.write(f"{kind}\t{payload}\n")
-                    fw.flush()
+                    kind, payload = _handle_cmd(cmd)
+                    if cmd.startswith("APPLY_UPDATE\t") and kind == "OK":
+                        os._exit(0)
                     if cmd == "QUIT":
                         break
             except (ConnectionResetError, BrokenPipeError, OSError) as exc:
                 logger.warning("Соединение с клиентом меню закрыто: %s", exc)
                 _log_gui_stderr_tail(project_root)
+
+        reader = threading.Thread(target=_reader, name="gui-rpc", daemon=True)
+        reader.start()
+        try:
+            reader.join()
         finally:
             fw.close()
             fr.close()
@@ -652,6 +672,8 @@ def _rpc_host_menu_fallback(project_root: Path) -> None:
                     kind, payload = _dispatch_rpc(cmd, orch)
                     fw.write(f"{kind}\t{payload}\n")
                     fw.flush()
+                    if cmd.startswith("APPLY_UPDATE\t") and kind == "OK":
+                        os._exit(0)
                     if cmd == "QUIT":
                         break
             except (ConnectionResetError, BrokenPipeError, OSError) as exc:
@@ -763,7 +785,9 @@ def main(argv: list[str] | None = None) -> None:
     if "--log-viewer" in argv:
         from cookie_grabber.log_viewer import main as run_log_viewer
 
-        run_log_viewer(argv)
+        # Только флаг режима; иначе argparse в log_viewer падает с «unrecognized arguments».
+        lv_argv = [a for a in argv if a != "--log-viewer"]
+        run_log_viewer(lv_argv)
         return
 
     if "--gui-client" in argv:

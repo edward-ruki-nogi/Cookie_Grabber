@@ -9,3 +9,4 @@ dist/
 build/
 .update_staging/
 logs/
+*.flag

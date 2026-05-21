@@ -152,10 +152,16 @@ def run_gui_client(host: str, port: int) -> None:
     root = ctk.CTk(fg_color=_C["bg"])
     root.title("Cookie Grabber")
 
+    _RPC_TIMEOUT_SEC = 45.0
+
     def rpc(cmd: str) -> tuple[str, str]:
-        wf.write(cmd.strip() + "\n")
-        wf.flush()
-        line = rf.readline()
+        try:
+            sock.settimeout(_RPC_TIMEOUT_SEC)
+            wf.write(cmd.strip() + "\n")
+            wf.flush()
+            line = rf.readline()
+        except OSError as exc:
+            return "ERR", f"Нет ответа от хоста ({exc}). Закройте exe и перезапустите."
         if not line:
             return "ERR", "Сервер закрыл соединение"
         parts = line.rstrip("\n").split("\t", 1)
@@ -414,7 +420,11 @@ def run_gui_client(host: str, port: int) -> None:
             refresh_ms = 1500
         cmd = log_viewer_argv(workers, refresh_ms)
         try:
-            subprocess.Popen(cmd, cwd=str(project_root))
+            popen_kw: dict = {"cwd": str(project_root)}
+            if sys.platform == "win32":
+                # Отдельное окно логов (tk), без лишней консоли рядом с exe.
+                popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            subprocess.Popen(cmd, **popen_kw)
         except Exception as exc:
             messagebox.showerror("Просмотр логов", str(exc))
 
@@ -884,7 +894,7 @@ def run_gui_client(host: str, port: int) -> None:
             root.destroy()
             raise SystemExit(0)
 
-        root.after(400, _exit)
+        root.after(100, _exit)
 
     def _confirm_and_apply(staged, info) -> None:
         if not messagebox.askyesno(
@@ -899,18 +909,12 @@ def run_gui_client(host: str, port: int) -> None:
         except OSError:
             pass
         kind, msg = rpc(f"APPLY_UPDATE\t{staged.resolve()}")
-        if kind != "OK":
-            # Хост мог закрыть сокет сразу после старта updater — считаем успехом.
-            if "закрыл соединение" not in (msg or "").lower():
-                messagebox.showerror("Обновление", f"Не удалось запустить установку:\n{msg}")
-                _finish_update_button()
-                return
-        messagebox.showinfo(
-            "Обновление",
-            "Установка запущена. Окно закроется, файлы обновятся и программа запустится снова.\n\n"
-            "Перед обновлением закройте cookie-grabber в Cursor/терминале на этом ПК.\n\n"
-            "Лог: .update_staging\\apply_update.log (должна быть строка apply_update v3).",
-        )
+        if kind != "OK" and "закрыл соединение" not in (msg or "").lower():
+            messagebox.showerror("Обновление", f"Не удалось запустить установку:\n{msg}")
+            _finish_update_button()
+            return
+        _finish_update_button()
+        # Не показывать блокирующий messagebox — bat ждёт PID GUI; консоль (хост) закроется сама.
         _quit_for_update()
 
     def on_check_update() -> None:

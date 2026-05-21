@@ -93,34 +93,60 @@ def init_worker_file_logging() -> None:
         _worker_handlers.append(fh)
 
 
+_PANEL_SIDECAR_SEP = "|"
+
+
+def _read_panel_sidecar(wid: int) -> tuple[str, str]:
+    path = logs_dir() / f"worker_{wid}_current.txt"
+    if not path.exists():
+        return "", ""
+    try:
+        return parse_worker_panel_sidecar(path.read_text(encoding="utf-8"))
+    except OSError:
+        return "", ""
+
+
+def parse_worker_panel_sidecar(text: str) -> tuple[str, str]:
+    """Формат ``worker_<n>_current.txt``: ``имя_аккаунта|порт`` (без номера строки)."""
+    raw = (text or "").strip()
+    if not raw:
+        return "", ""
+    if _PANEL_SIDECAR_SEP in raw:
+        acc, port = raw.split(_PANEL_SIDECAR_SEP, 1)
+        return acc.strip(), port.strip()
+    return raw, ""
+
+
+def format_worker_panel_title(worker_id: int, account: str = "", proxy_port: str = "") -> str:
+    """Заголовок панели: «Поток X - ADS_YY - ZZZZZ»."""
+    parts = [f"Поток {worker_id}"]
+    acc = (account or "").strip()
+    port = (proxy_port or "").strip()
+    if acc:
+        parts.append(acc)
+    if port:
+        parts.append(port)
+    return " - ".join(parts)
+
+
 def set_worker_panel_label(
     *,
     account: str = "",
     proxy_port: str | int = "",
-    row: int | None = None,
 ) -> None:
-    """Sidecar-файлы для заголовка панели в log_viewer (как Gala worker_*_current.txt)."""
+    """``logs/worker_<n>_current.txt`` — имя аккаунта и порт для заголовка в log_viewer."""
     wid = current_worker_id()
     if wid is None:
         return
     d = logs_dir()
-    parts: list[str] = []
-    acc = (account or "").strip()
-    if acc:
-        parts.append(acc)
-    if row is not None:
-        parts.append(f"строка {row}")
-    label = " — ".join(parts)
+    prev_acc, prev_port = _read_panel_sidecar(wid)
+    acc = (account or "").strip() or prev_acc
+    port_s = str(proxy_port).strip() if proxy_port not in ("", None) else prev_port
+    payload = f"{acc}{_PANEL_SIDECAR_SEP}{port_s}"
     try:
-        (d / f"worker_{wid}_current.txt").write_text(label, encoding="utf-8")
-    except OSError:
-        pass
-    port_s = str(proxy_port).strip() if proxy_port not in ("", None) else ""
-    port_path = d / f"worker_{wid}_port.txt"
-    try:
-        if port_s:
-            port_path.write_text(port_s, encoding="utf-8")
-        elif port_path.exists():
-            port_path.unlink()
+        (d / f"worker_{wid}_current.txt").write_text(payload, encoding="utf-8")
+        legacy_port = d / f"worker_{wid}_port.txt"
+        if legacy_port.exists():
+            legacy_port.unlink()
     except OSError:
         pass

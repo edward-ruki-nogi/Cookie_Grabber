@@ -32,11 +32,13 @@ hiddenimports = [
     "cookie_grabber.updates.github_release",
     "cookie_grabber.log_viewer",
     "cookie_grabber.log_bus.worker_files",
+    "cookie_grabber.playwright_thread",
+    "cookie_grabber.stop_flags",
     "cookie_grabber.farming.playwright_nav",
     "cookie_grabber.ui.theme",
 ]
 
-for pkg in ("customtkinter", "playwright", "tldextract"):
+for pkg in ("customtkinter", "playwright", "tldextract", "playwright_cookie_blocker"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries

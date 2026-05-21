@@ -12,7 +12,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
-from cookie_grabber.log_bus.worker_files import host_log_path, logs_dir, worker_log_path
+from cookie_grabber.log_bus.worker_files import (
+    format_worker_panel_title,
+    host_log_path,
+    logs_dir,
+    parse_worker_panel_sidecar,
+    worker_log_path,
+)
 from cookie_grabber.ui.theme import C, LOG_LEVEL, UI_FONT_LOG, UI_FONT_PANEL, UI_FONT_PANEL_HOST, UI_FONT_SM
 
 TAIL_BYTES = 60_000
@@ -68,24 +74,14 @@ def _nav_button(parent: tk.Widget, text: str, command) -> tk.Button:
     )
 
 
-def read_worker_current(worker_id: int) -> str:
+def read_worker_panel_meta(worker_id: int) -> tuple[str, str]:
     path = logs_dir() / f"worker_{worker_id}_current.txt"
     if not path.exists():
-        return ""
+        return "", ""
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return parse_worker_panel_sidecar(path.read_text(encoding="utf-8"))
     except OSError:
-        return ""
-
-
-def read_worker_proxy_port(worker_id: int) -> str:
-    path = logs_dir() / f"worker_{worker_id}_port.txt"
-    if not path.exists():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        return "", ""
 
 
 def read_tail(path: Path, max_bytes: int = TAIL_BYTES) -> str:
@@ -253,7 +249,15 @@ def create_host_panel(parent, **grid_opts) -> tuple[ttk.Frame, tk.Text, tk.Frame
     return frame, text, nav_frame
 
 
+def _startup_error_log_path() -> Path:
+    from cookie_grabber.log_bus.worker_files import logs_dir
+
+    return logs_dir() / "log_viewer_startup.log"
+
+
 def main(argv: list[str] | None = None) -> None:
+    if argv is not None:
+        argv = [a for a in argv if a != "--log-viewer"]
     parser = argparse.ArgumentParser(description="Просмотр логов потоков Cookie Grabber")
     parser.add_argument(
         "--workers",
@@ -268,7 +272,11 @@ def main(argv: list[str] | None = None) -> None:
         default=REFRESH_MS,
         help=f"Интервал обновления, мс (по умолчанию {REFRESH_MS})",
     )
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        _log_startup_failure(f"аргументы командной строки: {exc}")
+        raise
 
     n = args.workers
     if n <= 0:
@@ -395,14 +403,8 @@ def main(argv: list[str] | None = None) -> None:
             if slot_first_refresh[slot]:
                 at_bottom = True
 
-            acc = read_worker_current(wid)
-            port = read_worker_proxy_port(wid)
-            if acc and port:
-                title = f"Поток {wid} — {acc} ({port})"
-            elif acc:
-                title = f"Поток {wid} — {acc}"
-            else:
-                title = f"Поток {wid}"
+            acc, port = read_worker_panel_meta(wid)
+            title = format_worker_panel_title(wid, acc, port)
             header_lbl.config(text=title, fg=C["accent"])
 
             content = read_tail(worker_log_path(wid))
@@ -423,8 +425,33 @@ def main(argv: list[str] | None = None) -> None:
         root.after(refresh_ms, refresh)
 
     root.after(0, refresh)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except Exception as exc:
+        _log_startup_failure(f"mainloop: {exc}")
+        raise
+
+
+def _log_startup_failure(msg: str) -> None:
+    import traceback
+
+    try:
+        path = _startup_error_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            msg + "\n\n" + traceback.format_exc(),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _log_startup_failure(str(exc))
+        raise

@@ -15,6 +15,8 @@ from cookie_grabber.farming.selectors import is_ignored_interaction_label
 
 logger = logging.getLogger(__name__)
 
+_LOCATOR_OP_MS = 2500
+
 
 def _shutdown(control: RunControl | None) -> bool:
     return control is not None and control.shutdown.is_set()
@@ -72,7 +74,13 @@ def human_scroll_burst(page: Page, control: RunControl | None, max_sec: float = 
         cdp_mouse_wheel(page, dy)
         if random.random() < 0.12:
             down = not down
-        time.sleep(random.uniform(0.04, 0.14))
+        if control is not None:
+            from cookie_grabber.control.runtime_control import interruptible_sleep
+
+            if interruptible_sleep(random.uniform(0.04, 0.14), control):
+                return
+        else:
+            time.sleep(random.uniform(0.04, 0.14))
 
 
 def random_bezier_wander(page: Page, control: RunControl | None) -> None:
@@ -127,12 +135,12 @@ def _hover_and_maybe_safe_click(
                 if (el.getAttribute('role') === 'switch') return 2;
                 return 1;
             }""",
-            timeout=5000,
+            timeout=_LOCATOR_OP_MS,
         )
     except Exception:
         return
     try:
-        el.hover(timeout=1500)
+        el.hover(timeout=_LOCATOR_OP_MS)
     except Exception:
         return
     random_action_delay(

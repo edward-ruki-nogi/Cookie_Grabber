@@ -20,7 +20,7 @@ import random
 import time
 from typing import Any
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Playwright
 from playwright_cookie_blocker import block_cookie_dialogs
 
 from gala_9static_proxy.validator import StopAfter9ProxyDialog
@@ -38,6 +38,7 @@ from cookie_grabber.log_bus import set_worker_panel_label
 from cookie_grabber.farming.flow import farm_single_url_for_minutes
 from cookie_grabber.farming.playwright_nav import apply_page_timeouts
 from cookie_grabber.grabber_proxy import FarmingProxyHold, ProxyAllocator, format_ads_profile_name
+from cookie_grabber.playwright_thread import thread_playwright_session
 from cookie_grabber.sheets.cell_text import labels_equal, normalize_sheet_cell_scalar
 from cookie_grabber.sheets.google_sheets_api import GoogleSheetsApi
 
@@ -274,6 +275,8 @@ def _process_one_row(
     allocator: ProxyAllocator,
     control: RunControl,
     row: int,
+    *,
+    pw: Playwright,
 ) -> str:
     """Шаги 2..8 для одного N. Возвращает короткий код результата для лога."""
     sv = settings.status_values
@@ -324,7 +327,7 @@ def _process_one_row(
         return "no_profile_id"
 
     hold_key = (account_name or active_profile_id or f"row_{row}").strip() or f"row_{row}"
-    set_worker_panel_label(account=account_name or hold_key, row=row)
+    set_worker_panel_label(account=account_name or hold_key)
 
     # прокси (суффикс порта всегда возвращается в пул при выходе из with, см. hold_proxy)
     delta_pp = delta_wh = delta_kwiff = delta_mass = 0.0
@@ -346,7 +349,7 @@ def _process_one_row(
                 return "no_proxy"
 
             ads_profile_name = format_ads_profile_name(account_name, acq.proxy.port)
-            set_worker_panel_label(account=account_name or hold_key, row=row, proxy_port=acq.proxy.port)
+            set_worker_panel_label(account=account_name or hold_key, proxy_port=acq.proxy.port)
             proxy_hold = FarmingProxyHold(
                 allocator=allocator,
                 acquisition=acq,
@@ -416,60 +419,59 @@ def _process_one_row(
             t_session_start = time.perf_counter()
 
             try:
-                with sync_playwright() as pw:
-                    browser = pw.chromium.connect_over_cdp(started.ws_puppeteer)
+                browser = pw.chromium.connect_over_cdp(started.ws_puppeteer)
+                try:
+                    context = browser.contexts[0] if browser.contexts else browser.new_context()
                     try:
-                        context = browser.contexts[0] if browser.contexts else browser.new_context()
-                        try:
-                            # Правила «I Still Don't Care About Cookies»: сеть/CSS/autoclick по доменам.
-                            block_cookie_dialogs(context)
-                        except Exception as exc:
-                            logger.warning(
-                                "block_cookie_dialogs (ai-dont-care-about-cookies) не применён: %s",
-                                exc,
-                            )
-                        page = context.pages[0] if context.pages else context.new_page()
-                        apply_page_timeouts(page, settings)
+                        # Правила «I Still Don't Care About Cookies»: сеть/CSS/autoclick по доменам.
+                        block_cookie_dialogs(context)
+                    except Exception as exc:
+                        logger.warning(
+                            "block_cookie_dialogs (ai-dont-care-about-cookies) не применён: %s",
+                            exc,
+                        )
+                    page = context.pages[0] if context.pages else context.new_page()
+                    apply_page_timeouts(page, settings)
 
-                        if settings.farming.show_synthetic_mouse:
-                            try:
-                                install_synthetic_mouse_overlay(page)
-                            except Exception as exc:
-                                logger.warning("show_synthetic_mouse overlay: %s", exc)
-
-                        # п.3: PP
-                        if not _skip_new_farming_tasks(control):
-                            delta_pp = _farm_important(
-                                page, settings, control, "PP", proxy_hold=proxy_hold
-                            )
-                        # п.4: WH
-                        if not _skip_new_farming_tasks(control):
-                            delta_wh = _farm_important(
-                                page, settings, control, "WH", proxy_hold=proxy_hold
-                            )
-                        # п.5: Kwiff
-                        if not _skip_new_farming_tasks(control):
-                            delta_kwiff = _farm_important(
-                                page, settings, control, "Kwiff", proxy_hold=proxy_hold
-                            )
-                        # п.6: массовка
-                        if not _skip_new_farming_tasks(control):
-                            delta_mass = _farm_mass(page, settings, control, proxy_hold=proxy_hold)
-                    finally:
+                    if settings.farming.show_synthetic_mouse:
                         try:
-                            n_tabs = _close_all_browser_tabs(browser)
-                            if n_tabs:
-                                logger.info(
-                                    "Сессия %s: закрыто вкладок перед остановкой браузера: %s",
-                                    account_name or active_profile_id,
-                                    n_tabs,
-                                )
+                            install_synthetic_mouse_overlay(page)
                         except Exception as exc:
-                            logger.debug("close_all_browser_tabs: %s", exc)
-                        try:
-                            browser.close()
-                        except Exception:
-                            pass
+                            logger.warning("show_synthetic_mouse overlay: %s", exc)
+
+                    # п.3: PP
+                    if not _skip_new_farming_tasks(control):
+                        delta_pp = _farm_important(
+                            page, settings, control, "PP", proxy_hold=proxy_hold
+                        )
+                    # п.4: WH
+                    if not _skip_new_farming_tasks(control):
+                        delta_wh = _farm_important(
+                            page, settings, control, "WH", proxy_hold=proxy_hold
+                        )
+                    # п.5: Kwiff
+                    if not _skip_new_farming_tasks(control):
+                        delta_kwiff = _farm_important(
+                            page, settings, control, "Kwiff", proxy_hold=proxy_hold
+                        )
+                    # п.6: массовка
+                    if not _skip_new_farming_tasks(control):
+                        delta_mass = _farm_mass(page, settings, control, proxy_hold=proxy_hold)
+                finally:
+                    try:
+                        n_tabs = _close_all_browser_tabs(browser)
+                        if n_tabs:
+                            logger.info(
+                                "Сессия %s: закрыто вкладок перед остановкой браузера: %s",
+                                account_name or active_profile_id,
+                                n_tabs,
+                            )
+                    except Exception as exc:
+                        logger.debug("close_all_browser_tabs: %s", exc)
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
             finally:
                 last_seconds = max(0.0, time.perf_counter() - t_session_start)
                 try:
@@ -519,43 +521,47 @@ def run_account_loop(
 
     Останавливается на ``control.shutdown``; ``safe_stop`` — между итерациями.
     """
-    while not control.shutdown.is_set():
-        if control.safe_stop.is_set():
-            logger.info("safe_stop: воркер выходит из цикла")
-            return
-        if _wait_if_paused(control):
-            return
+    with thread_playwright_session() as pw:
+        while not control.shutdown.is_set():
+            if control.safe_stop.is_set():
+                logger.info("safe_stop: воркер выходит из цикла")
+                return
+            if _wait_if_paused(control):
+                return
 
-        limit = control.accounts_per_run_limit
-        reserved = False
-        if limit > 0:
-            with control.profile_quota_lock:
-                if control.profiles_started_this_run >= limit:
-                    logger.info("Лимит Выполнений (%s): воркер завершается без новых профилей.", limit)
+            limit = control.accounts_per_run_limit
+            reserved = False
+            if limit > 0:
+                with control.profile_quota_lock:
+                    if control.profiles_started_this_run >= limit:
+                        logger.info(
+                            "Лимит Выполнений (%s): воркер завершается без новых профилей.",
+                            limit,
+                        )
+                        return
+                    control.profiles_started_this_run += 1
+                    reserved = True
+
+            try:
+                n = sheets.acquire_next_row_index()
+            except Exception as exc:
+                if reserved:
+                    with control.profile_quota_lock:
+                        control.profiles_started_this_run -= 1
+                logger.exception("acquire_next_row_index failed: %s", exc)
+                if interruptible_sleep(2.0, control):
                     return
-                control.profiles_started_this_run += 1
-                reserved = True
+                continue
 
-        try:
-            n = sheets.acquire_next_row_index()
-        except Exception as exc:
-            if reserved:
+            result = _process_one_row(settings, sheets, ads, allocator, control, n, pw=pw)
+            if reserved and _profile_quota_should_release_reservation(result):
                 with control.profile_quota_lock:
                     control.profiles_started_this_run -= 1
-            logger.exception("acquire_next_row_index failed: %s", exc)
-            if interruptible_sleep(2.0, control):
+
+            if result == "reset_counter":
+                # n был выдан — теперь A2 сброшен в first_data_row, продолжаем сразу
+                continue
+            if result == "stop_dialog":
                 return
-            continue
-
-        result = _process_one_row(settings, sheets, ads, allocator, control, n)
-        if reserved and _profile_quota_should_release_reservation(result):
-            with control.profile_quota_lock:
-                control.profiles_started_this_run -= 1
-
-        if result == "reset_counter":
-            # n был выдан — теперь A2 сброшен в first_data_row, продолжаем сразу
-            continue
-        if result == "stop_dialog":
-            return
-        # короткий рандомизированный inter-row sleep, чтобы не долбить API
-        interruptible_sleep(random.uniform(0.5, 1.5), control)
+            # короткий рандомизированный inter-row sleep, чтобы не долбить API
+            interruptible_sleep(random.uniform(0.5, 1.5), control)

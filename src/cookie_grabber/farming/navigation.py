@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -32,6 +33,9 @@ _PATH_SEGMENT_DENY = frozenset(
         "join",
     }
 )
+
+_LINK_OP_TIMEOUT_MS = 2000
+_LINK_SCAN_BUDGET_SEC = 15.0
 
 _FILE_SUFFIX_DENY = (
     ".pdf",
@@ -110,7 +114,7 @@ def link_zone_weight_score(page: Page, locator: Locator) -> float:
                 }
                 return 2;
             }""",
-            timeout=5000,
+            timeout=_LINK_OP_TIMEOUT_MS,
         )
     except Exception:
         return 1.0
@@ -151,6 +155,7 @@ def pick_internal_navigation_locator(
     max_links: int = 220,
 ) -> tuple[Locator, str] | None:
     """Возвращает (locator, normalized_absolute_url) или None."""
+    scan_deadline = time.monotonic() + _LINK_SCAN_BUDGET_SEC
     links = page.locator("a[href]")
     try:
         total = min(links.count(), max_links)
@@ -164,10 +169,12 @@ def pick_internal_navigation_locator(
     pool: list[tuple[Locator, float, str]] = []
 
     for i in range(total):
+        if time.monotonic() >= scan_deadline:
+            break
         a = links.nth(i)
         try:
-            href = (a.get_attribute("href") or "").strip()
-            link_txt = (a.inner_text(timeout=400) or "").strip()
+            href = (a.get_attribute("href", timeout=_LINK_OP_TIMEOUT_MS) or "").strip()
+            link_txt = (a.inner_text(timeout=_LINK_OP_TIMEOUT_MS) or "").strip()
         except Exception:
             continue
         if is_ignored_interaction_label(link_txt):

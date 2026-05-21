@@ -21,10 +21,11 @@ from gala_9static_proxy import (
     acquire_9static_port_and_config,
     validate_and_activate_proxy,
     wait_unban_if_needed,
-    worker_proxy_cwd,
 )
 
 from cookie_grabber.config.settings import AppSettings
+from cookie_grabber.control.runtime_control import RunControl
+from cookie_grabber.runtime_paths import application_root
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,11 @@ def _atexit_release_all_proxy_suffixes() -> None:
 
 
 atexit.register(_atexit_release_all_proxy_suffixes)
+
+
+def _proxy_cwd() -> str:
+    """Каталог флагов остановки и cwd для gala_9static_proxy (рядом с exe)."""
+    return str(application_root())
 
 # Уже заданный в ADS суффикс « - {порт}» снимаем, чтобы при смене прокси не дублировать.
 _ADS_PROFILE_PORT_SUFFIX = re.compile(r" - \d+$")
@@ -162,7 +168,7 @@ class ProxyAllocator:
         port_prefix = int(self._settings.proxy.port_prefix)
         isp = (self._settings.proxy.isp or "").strip()
         use_today = bool(self._settings.proxy.use_today_list)
-        cwd = worker_proxy_cwd()
+        cwd = _proxy_cwd()
         tid = threading.get_ident()
 
         for _ in range(attempts):
@@ -224,17 +230,26 @@ class ProxyAllocator:
 
         return None
 
-    def ensure_proxy_valid(self, acq: ProxyAcquisition, account_name: str) -> bool:
+    def ensure_proxy_valid(
+        self,
+        acq: ProxyAcquisition,
+        account_name: str,
+        control: RunControl | None = None,
+    ) -> bool:
         """Проверка socks5; при невалидности — активация через API 9 static (тот же порт)."""
+        if control is not None and control.shutdown.is_set():
+            return False
         host = acq.proxy.host
         port_str = str(acq.proxy.port)
         isp = (self._settings.proxy.isp or "").strip()
         use_today = bool(self._settings.proxy.use_today_list)
-        cwd = worker_proxy_cwd()
+        cwd = _proxy_cwd()
         acc = (account_name or "").strip() or "account"
 
         try:
             wait_unban_if_needed(self._timeout_state, cwd, acc)
+            if control is not None and control.shutdown.is_set():
+                return False
             ok, _err = validate_and_activate_proxy(
                 host,
                 port_str,
@@ -250,6 +265,9 @@ class ProxyAllocator:
             if ok:
                 logger.debug("proxy check OK for %s on %s:%s", acc, host, port_str)
                 return True
+
+            if control is not None and (control.shutdown.is_set() or control.safe_stop.is_set()):
+                return False
 
             logger.info(
                 "Прокси невалиден для %s (%s:%s) — активация через API 9 static",
