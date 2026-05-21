@@ -205,20 +205,15 @@ def launch_apply_update(staged_payload_dir: Path) -> None:
         str(exe_path.resolve()),
         str(pids_file.resolve()),
     ]
-    log_dir = target / STAGING_DIR_NAME
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "apply_update_launch.log"
-    try:
-        log_f = log_path.open("a", encoding="utf-8")
-    except OSError:
-        log_f = subprocess.DEVNULL  # type: ignore[assignment]
+    # CREATE_NEW_CONSOLE и DETACHED_PROCESS вместе дают WinError 87 на Windows.
+    # Лог установки пишет apply_update.bat в .update_staging\apply_update.log
+    creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     subprocess.Popen(
         args,
         cwd=str(target),
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-        creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS,  # type: ignore[attr-defined]
-        close_fds=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        close_fds=True,
     )
-    if hasattr(log_f, "close") and log_f not in (subprocess.DEVNULL, sys.stdout, sys.stderr):
-        log_f.close()

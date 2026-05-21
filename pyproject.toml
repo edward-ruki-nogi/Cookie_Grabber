@@ -1,6 +1,6 @@
 [project]
 name = "cookie-grabber"
-version = "0.2.8"
+version = "0.2.9"
 description = "ADS Power cookie farming bot with Playwright and Google Sheets"
 requires-python = ">=3.10"
 dependencies = [
